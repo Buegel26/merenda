@@ -59,8 +59,8 @@ type
     xHoverRow, xHoverColumn: int
     xHoveredLink: TerminalLink
     xLastInputError: string
-    xBlinkElapsed: Duration
-    xBlinkVisible: bool
+    xBlinkElapsed, xMaintenanceElapsed: Duration
+    xTextBlinkVisible, xCursorBlinkVisible, xBlinkActive, xHasBlinkingText: bool
     xOutputWatch: TerminalOutputWatch
     xOutputWatchReady: bool
     xHeartbeat: Animation
@@ -618,8 +618,10 @@ proc appendTerminalRow(
       cell,
       view.xPalette,
       selected = view.xHasSelection and view.xSelection.contains(absoluteRow, column),
-      blinkVisible = view.xBlinkVisible,
+      blinkVisible = view.xTextBlinkVisible,
     )
+    if taBlink in cell.style.attributes:
+      view.xHasBlinkingText = true
     if view.xHoveredLink.contains(absoluteRow, column):
       style.decorations.incl mtdUnderline
     builder.addCell(
@@ -661,6 +663,7 @@ proc synchronizeTerminalGrid(
       view.appendTerminalRow(session, columns, firstReplacementRow + row, builder)
     view.scrollGridRows(rowOffset, provider)
   elif not dimensionsMatch or not unchangedGeneration or rowOffset != 0:
+    view.xHasBlinkingText = false
     let provider: MonoTextRowProvider = proc(
         row: int, builder: var MonoTextRowBuilder
     ) =
@@ -727,7 +730,7 @@ proc syncTerminalScreen(view: TerminalView) =
     view.setCursorPosition(cursor.position.row, cursor.position.column)
   view.cursorVisible =
     view.xScrollPosition == 0.0'f32 and cursor.visible and
-    (not cursor.blinking or view.xBlinkVisible)
+    (not cursor.blinking or not view.xBlinkActive or view.xCursorBlinkVisible)
   view.cursorStyle =
     case cursor.shape
     of tcsBlock: mtcBlock
@@ -1048,8 +1051,8 @@ proc terminalWatchFailed(view: TerminalView, token: uint64) {.slot.} =
 proc terminalTicked(view: TerminalView, delta: Duration) {.slot.} =
   if view.isNil:
     return
-  view.xBlinkElapsed = view.xBlinkElapsed + delta
-  let maintenanceDue = view.xBlinkElapsed >= initDuration(milliseconds = 500)
+  view.xMaintenanceElapsed = view.xMaintenanceElapsed + delta
+  let maintenanceDue = view.xMaintenanceElapsed >= initDuration(milliseconds = 500)
   if not view.xOutputWatchReady or maintenanceDue:
     let token = if view.xOutputWatch.isNil: 0'u64 else: view.xOutputWatch.token
     discard view.poll()
@@ -1057,20 +1060,49 @@ proc terminalTicked(view: TerminalView, delta: Duration) {.slot.} =
     if maintenanceDue:
       view.rearmTerminalOutput(token)
   if maintenanceDue:
+    view.xMaintenanceElapsed = initDuration()
+    if view.xHasBlinkingText:
+      view.xTextBlinkVisible = not view.xTextBlinkVisible
+      view.xLastGeneration = high(uint64)
+  if view.xBlinkActive:
+    view.xBlinkElapsed = view.xBlinkElapsed + delta
+  if view.xBlinkActive and view.xBlinkElapsed >= initDuration(milliseconds = 500):
     view.xBlinkElapsed = initDuration()
-    view.xBlinkVisible = not view.xBlinkVisible
-    view.xLastGeneration = high(uint64)
+    view.xCursorBlinkVisible = not view.xCursorBlinkVisible
     view.syncTerminalScreen()
+  elif maintenanceDue and view.xHasBlinkingText:
+    view.syncTerminalScreen()
+
+proc setTerminalBlinkActive(view: TerminalView, active: bool) =
+  if view.xBlinkActive == active:
+    return
+  view.xBlinkActive = active
+  view.xBlinkElapsed = initDuration()
+  if not view.xCursorBlinkVisible:
+    view.xCursorBlinkVisible = true
+    view.syncTerminalScreen()
+
+proc refreshTerminalBlinkFocus(view: TerminalView) =
+  let owner = view.window()
+  view.setTerminalBlinkActive(
+    view.isFocused() and owner of Window and Window(owner).isKeyWindow()
+  )
+
+proc terminalWindowFocusChanged(view: TerminalView) {.slot.} =
+  view.refreshTerminalBlinkFocus()
 
 proc stopTerminalPolling(view: TerminalView) =
   if view.isNil:
     return
+  view.setTerminalBlinkActive(false)
   if not view.xOutputWatch.isNil:
     view.xOutputWatch.stop()
     view.xOutputWatch = nil
   view.xOutputWatchReady = false
   let owner = view.xPollingWindow[]
   if not owner.isNil:
+    owner.disconnect(didBecomeKeyWindow, view, terminalWindowFocusChanged)
+    owner.disconnect(didResignKeyWindow, view, terminalWindowFocusChanged)
     owner.animationScheduler().disconnect(schedulerTicked, view, terminalTicked)
     if not view.xHeartbeat.isNil:
       discard owner.stopAnimation(view.xHeartbeat)
@@ -1087,6 +1119,10 @@ proc startTerminalPolling(view: TerminalView) =
   let owner = Window(responder)
   view.xPollingWindow[] = owner
   view.xBlinkElapsed = initDuration()
+  view.xMaintenanceElapsed = initDuration()
+  owner.connect(didBecomeKeyWindow, view, terminalWindowFocusChanged)
+  owner.connect(didResignKeyWindow, view, terminalWindowFocusChanged)
+  view.refreshTerminalBlinkFocus()
   owner.animationScheduler().connect(schedulerTicked, view, terminalTicked)
   view.xHeartbeat = newAnimation(duration = initDuration(seconds = 1))
   view.xHeartbeat.loopCount = -1
@@ -1160,11 +1196,13 @@ protocol TerminalViewEditingCommands of TextEditingCommandProtocol:
 
 protocol TerminalViewFocus of ResponderProtocol:
   method didBecomeFirstResponder(view: TerminalView) =
+    view.refreshTerminalBlinkFocus()
     discard view.sendInput(
       terminput.terminalFocusInput(true, view.xSession.screenInfo().modes)
     )
 
   method didResignFirstResponder(view: TerminalView) =
+    view.refreshTerminalBlinkFocus()
     discard view.sendInput(
       terminput.terminalFocusInput(false, view.xSession.screenInfo().modes)
     )
@@ -1216,7 +1254,8 @@ proc initTerminalViewFields*(
   view.xLastScrollbackCount = view.xSession.screenInfo().scrollbackCount
   view.xLastScrollbackLinesAdded = view.xSession.screenInfo().scrollbackLinesAdded
   view.xLastScrollbackResetCount = view.xSession.screenInfo().scrollbackResetCount
-  view.xBlinkVisible = true
+  view.xTextBlinkVisible = true
+  view.xCursorBlinkVisible = true
   view.clipsToBounds = true
   view.focusRingType = frtNone
   view.padding = DefaultTerminalPadding
