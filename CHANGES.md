@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Refresh cached MonoText rows when horizontal scrolling exposes new columns,
+  and recapture drawing slots that depend on changed view bounds.
+- Transfer only changed scroll transforms and view ordering to the renderer,
+  including correct placement of retained explicit drawing layers.
+- Reuse Git diff section geometry while scrolling and avoid invalidating
+  unchanged headers, including offscreen headers.
+- Keep opened Git diff sections loaded when they scroll out of view, preserving
+  selection and layout until collapse. Large diffs still require an explicit open.
+- Preserve the file browser's pixel scroll position across filesystem and Git
+  refreshes, including partially visible selected rows and the end of the list.
+  Keep the same files and selection in place when rows above the viewport change.
+- Stream Matter syntax colors into Moe in bounded row batches, retaining
+  multiline state and rejecting results from superseded edits.
+- Display Markdown structure before code highlighting completes, then patch
+  code colors in place while preserving selection and embedded code views.
+- Reuse cached text layout for color-only edits and refresh visible glyph colors
+  without reshaping text or replacing shared glyph geometry.
+- Use Matter 0.5.1's ARC ownership fix so discarded highlighting caches release
+  recursive compiled grammars, including grammars retained by saved jobs.
+- Release streamed code source copies promptly, map unquoted Markdown code with
+  one range, and index code presentations by their highlighting request.
+- Decorate URI underlines within incoming Kosmo highlighting batches to avoid
+  repeatedly copying the completed highlight prefix.
+
 - Blink the terminal cursor only while its view and window are focused, and avoid
   rebuilding the terminal grid when only the cursor changes.
 - Watch terminal PTY readiness on POSIX instead of polling every animation frame,

@@ -132,9 +132,18 @@ type
     firstLineRect: Rect
     resolved: bool
 
+  MarkdownCodeSlice = object
+    sourceRange: TextRange
+    documentStart: int
+
   MarkdownCodeBlockPresentation = object
     range: TextRange
     storage: TextStorage
+    code: MarkdownCodeSource
+    codeStart: int
+    codeIndex: int
+    codeAttributes: TextAttributes
+    slices: seq[MarkdownCodeSlice]
 
   MarkdownCodeBlockScrollPresentation = object
     range: TextRange
@@ -267,7 +276,12 @@ type
     xMarkdownRenderChunkCount: int
     xMarkdownMaximumRenderChunkDuration: Duration
     xSyntaxHighlighter: SyntaxHighlighter
-    xMatterHighlights: Table[tuple[source, language: string], seq[SyntaxTokenSpan]]
+    xMatterHighlights: seq[seq[SyntaxTokenSpan]]
+    xMatterCodeIndices: Table[MarkdownCodeSource, int]
+    xMarkdownCodePresentations: seq[MarkdownCodeBlockPresentation]
+    xMarkdownCodePresentationIndices: seq[seq[int]]
+    xActiveMarkdownHighlightGeneration: uint64
+    xMarkdownHighlightStarted: bool
     xImageBasePath: string
     xImageLoader: MarkdownImageLoader
     xUrlAssetLoader: UrlAssetLoader
@@ -679,11 +693,12 @@ proc add(builder: var MarkdownBuilder, rendered: sink MarkdownBuilder) =
         (int(builder.runs[^1].range.length) + int(shifted.range.length)).Natural
     else:
       builder.runs.add shifted
-  for presentation in rendered.codeBlocks:
-    var shifted = presentation
-    shifted.range = initTextRange(
-      offset + int(presentation.range.location), int(presentation.range.length)
-    )
+  for presentation in rendered.codeBlocks.mitems:
+    var shifted = move presentation
+    shifted.range =
+      initTextRange(offset + int(shifted.range.location), int(shifted.range.length))
+    for slice in shifted.slices.mitems:
+      slice.documentStart += offset
     builder.codeBlocks.add shifted
   for presentation in rendered.images:
     var shifted = presentation
@@ -1316,17 +1331,54 @@ type QuoteOffsetSegment = object
   sourceStart: int
   destinationStart: int
 
-proc quoteDestination(segments: openArray[QuoteOffsetSegment], sourceIndex: int): int =
-  var
-    low = 0
-    high = segments.len
-  while low + 1 < high:
-    let middle = (low + high) div 2
+func quoteSegmentIndex(segments: openArray[QuoteOffsetSegment], sourceIndex: int): int =
+  var high = segments.len
+  while result + 1 < high:
+    let middle = (result + high) div 2
     if segments[middle].sourceStart <= sourceIndex:
-      low = middle
+      result = middle
     else:
       high = middle
-  segments[low].destinationStart + sourceIndex - segments[low].sourceStart
+
+proc quoteDestination(segments: openArray[QuoteOffsetSegment], sourceIndex: int): int =
+  let index = segments.quoteSegmentIndex(sourceIndex)
+  segments[index].destinationStart + sourceIndex - segments[index].sourceStart
+
+proc quoteCodeSlices(
+    slices: openArray[MarkdownCodeSlice], segments: openArray[QuoteOffsetSegment]
+): seq[MarkdownCodeSlice] =
+  # Split only where a quote inserts a prefix into a source-to-document range.
+  if slices.len == 0:
+    return
+  var segmentIndex = segments.quoteSegmentIndex(slices[0].documentStart)
+  for slice in slices:
+    var first = slice.documentStart
+    let stop = first + int(slice.sourceRange.length)
+    while first < stop:
+      while segmentIndex + 1 < segments.len and
+          segments[segmentIndex + 1].sourceStart <= first:
+        inc segmentIndex
+      let
+        segment = segments[segmentIndex]
+        last =
+          if segmentIndex + 1 < segments.len:
+            min(stop, segments[segmentIndex + 1].sourceStart)
+          else:
+            stop
+        mapped = MarkdownCodeSlice(
+          sourceRange: initTextRange(
+            int(slice.sourceRange.location) + first - slice.documentStart, last - first
+          ),
+          documentStart: segment.destinationStart + first - segment.sourceStart,
+        )
+      if result.len > 0 and
+          result[^1].sourceRange.maxIndex == int(mapped.sourceRange.location) and
+          result[^1].documentStart + int(result[^1].sourceRange.length) ==
+          mapped.documentStart:
+        result[^1].sourceRange.length += mapped.sourceRange.length
+      else:
+        result.add mapped
+      first = last
 
 proc renderBlockquote(
     builder: var MarkdownBuilder,
@@ -1377,12 +1429,13 @@ proc renderBlockquote(
             destinationStart: builder.runeLength,
           )
 
-  for presentation in quoted.codeBlocks:
-    var mapped = presentation
+  for presentation in quoted.codeBlocks.mitems:
+    var mapped = move presentation
     let
-      start = segments.quoteDestination(int(presentation.range.location))
-      stop = segments.quoteDestination(presentation.range.maxIndex)
+      start = segments.quoteDestination(int(mapped.range.location))
+      stop = segments.quoteDestination(mapped.range.maxIndex)
     mapped.range = initTextRange(start, stop - start)
+    mapped.slices = mapped.slices.quoteCodeSlices(segments)
     builder.codeBlocks.add mapped
   for presentation in quoted.images:
     var mapped = presentation
@@ -1497,14 +1550,26 @@ proc renderBlock(
       infoAttributes.backgroundColor = renderedCode.style.codeBlockStyle.backgroundColor
       infoAttributes.paragraphStyle.lineBreakMode = tlbmClipping
       renderedCode.add("[" & code.info & "]\n", infoAttributes)
+    let
+      codeSource = (source: code.doc.strip(chars = {'\n'}), language: code.info)
+      codeStart = renderedCode.runeLength
     renderedCode.addHighlightedCode(
-      code.doc.strip(chars = {'\n'}), code.info, codeAttributes
+      codeSource.source, codeSource.language, codeAttributes
     )
     if renderedCode.runeLength > 0:
-      let blockRange = initTextRange(0, renderedCode.runeLength)
-      renderedCode.codeBlocks.add MarkdownCodeBlockPresentation(
-        range: blockRange, storage: newTextStorage(renderedCode.text, renderedCode.runs)
+      var presentation = MarkdownCodeBlockPresentation(
+        range: initTextRange(0, renderedCode.runeLength),
+        storage: newTextStorage(renderedCode.text, renderedCode.runs),
+        code: codeSource,
+        codeStart: codeStart,
+        codeAttributes: codeAttributes,
       )
+      let codeLength = renderedCode.runeLength - codeStart
+      if codeLength > 0:
+        presentation.slices.add MarkdownCodeSlice(
+          sourceRange: initTextRange(0, codeLength), documentStart: codeStart
+        )
+      renderedCode.codeBlocks.add move presentation
       builder.add(move renderedCode)
   elif token of markdownParser.ThematicBreak:
     var ruleAttributes = attributes
@@ -2068,7 +2133,14 @@ proc applyMarkdownDocument(view: MarkdownView, document: sink MarkdownDocument) 
   else:
     view.textStorage = document.storage
   textView.installMarkdownHeadings(document.headings)
-  textView.installMarkdownCodeBlocks(document.codeBlocks)
+  view.xMarkdownCodePresentations = move document.codeBlocks
+  view.xMarkdownCodePresentationIndices = newSeq[seq[int]](view.xMatterHighlights.len)
+  for index, presentation in view.xMarkdownCodePresentations.mpairs:
+    presentation.codeIndex = view.xMatterCodeIndices.getOrDefault(presentation.code, -1)
+    presentation.code = default(MarkdownCodeSource)
+    if presentation.codeIndex >= 0:
+      view.xMarkdownCodePresentationIndices[presentation.codeIndex].add index
+  textView.installMarkdownCodeBlocks(view.xMarkdownCodePresentations)
   textView.installMarkdownTables(document.tables)
   view.pruneMarkdownImageCache(document.imageUrls)
   textView.needsDisplay = true
@@ -2219,6 +2291,111 @@ proc clearMarkdownImageLoaders(builder: var MarkdownBuilder) =
   builder.imageLoader = nil
   builder.imageContentTypeLoader = nil
 
+proc finishMarkdownWork(view: MarkdownView) =
+  if view.xActiveMarkdownGeneration == 0 and view.xActiveMarkdownHighlightGeneration == 0:
+    view.releaseMarkdownViewAfterParsing()
+    if view.xActiveMarkdownRenderGeneration == 0 and
+        view.xPendingMarkdownCompletionGeneration == view.xMarkdownRootGeneration and
+        view.xPendingMarkdownCompletionGeneration == view.xMarkdownGeneration:
+      view.xPendingMarkdownCompletionGeneration = 0
+      emit view.markdownDidFinishParsing(view.xMarkdownParseWorkerThreadId)
+
+proc applyCodeOverlays(storage: TextStorage, overlays: seq[TextAttributeRun]) =
+  if overlays.len == 0:
+    return
+  let
+    first = int(overlays[0].range.location)
+    stop = overlays[^1].range.maxIndex
+    affected = initTextRange(first, stop - first)
+  var preserved: seq[TextAttributeRun]
+  # Keep quote prefixes, labels and other existing attributes inside the
+  # affected interval. Apply all syntax overlays with one storage notification.
+  for run in storage.runs:
+    if run.range.maxIndex > first and int(run.range.location) < stop:
+      preserved.add run
+  preserved.add overlays
+  storage.setAttributeRanges(affected, storage.attributesAt(first), preserved)
+
+proc applyMarkdownCodeColors(
+    view: MarkdownView, codeIndex: int, spans: openArray[SyntaxTokenSpan]
+) =
+  if spans.len == 0 or codeIndex < 0 or
+      codeIndex >= view.xMarkdownCodePresentationIndices.len:
+    return
+  var document: seq[TextAttributeRun]
+  for index in view.xMarkdownCodePresentationIndices[codeIndex]:
+    let presentation {.cursor.} = view.xMarkdownCodePresentations[index]
+    var embedded: seq[TextAttributeRun]
+    var low = 0
+    var high = presentation.slices.len
+    while low < high:
+      let middle = (low + high) div 2
+      if presentation.slices[middle].sourceRange.maxIndex <= int(
+        spans[0].range.location
+      ):
+        low = middle + 1
+      else:
+        high = middle
+    var sliceIndex = low
+    for span in spans:
+      var attributes = presentation.codeAttributes
+      attributes.foregroundColor =
+        view.xMarkdownStyle.syntaxTokenColors[span.tokenClass]
+      embedded.add TextAttributeRun(
+        range: initTextRange(
+          presentation.codeStart + int(span.range.location), int(span.range.length)
+        ),
+        attributes: attributes,
+      )
+      while sliceIndex < presentation.slices.len and
+          presentation.slices[sliceIndex].sourceRange.maxIndex <=
+          int(span.range.location)
+      :
+        inc sliceIndex
+      var index = sliceIndex
+      while index < presentation.slices.len and
+          int(presentation.slices[index].sourceRange.location) < span.range.maxIndex:
+        let
+          slice = presentation.slices[index]
+          first = max(int(span.range.location), int(slice.sourceRange.location))
+          stop = min(span.range.maxIndex, slice.sourceRange.maxIndex)
+        if stop > first:
+          document.add TextAttributeRun(
+            range: initTextRange(
+              slice.documentStart + first - int(slice.sourceRange.location),
+              stop - first,
+            ),
+            attributes: attributes,
+          )
+        inc index
+    presentation.storage.applyCodeOverlays(embedded)
+  view.textStorage.applyCodeOverlays(document)
+  view.textView().needsDisplay = true
+
+proc receiveMarkdownHighlight(
+    view: MarkdownView, batch: sink MarkdownHighlightBatch
+) {.slot.} =
+  if batch.generation != view.xActiveMarkdownHighlightGeneration:
+    return
+  # One scheduled application acknowledges one worker slice. Even if Sigils
+  # drains multiple signals, colors are only patched during owner-thread work.
+  scheduleMainThreadWork(
+    proc(): bool =
+      if batch.generation != view.xActiveMarkdownHighlightGeneration or
+          batch.generation != view.xMarkdownGeneration:
+        return false
+      if view.xActiveMarkdownRenderGeneration != 0:
+        return true
+      if batch.codeIndex >= 0 and batch.codeIndex < view.xMatterHighlights.len:
+        view.xMatterHighlights[batch.codeIndex].add batch.spans
+        view.applyMarkdownCodeColors(batch.codeIndex, batch.spans)
+      if batch.finished:
+        view.xActiveMarkdownHighlightGeneration = 0
+        view.finishMarkdownWork()
+      else:
+        emit view.xMarkdownParseWorker.continueMarkdownHighlight(batch.generation)
+  )
+
 proc continueMarkdownRendering(view: MarkdownView, generation: uint64): bool =
   if view.isNil or generation != view.xActiveMarkdownRenderGeneration or
       generation != view.xMarkdownRenderJob.generation:
@@ -2285,9 +2462,11 @@ proc continueMarkdownRendering(view: MarkdownView, generation: uint64): bool =
   view.xMarkdownMaximumRenderChunkDuration = job.maximumChunkDuration
 
   if generation == view.xMarkdownRenderGeneration and
-      rootGeneration == view.xPendingMarkdownCompletionGeneration:
-    view.xPendingMarkdownCompletionGeneration = 0
-    emit view.markdownDidFinishParsing(view.xMarkdownParseWorkerThreadId)
+      rootGeneration == view.xActiveMarkdownHighlightGeneration and
+      not view.xMarkdownHighlightStarted:
+    view.xMarkdownHighlightStarted = true
+    emit view.xMarkdownParseWorker.continueMarkdownHighlight(rootGeneration)
+  view.finishMarkdownWork()
 
 proc scheduleMarkdownRendering(view: MarkdownView) =
   var highlighter = view.xSyntaxHighlighter
@@ -2297,7 +2476,9 @@ proc scheduleMarkdownRendering(view: MarkdownView) =
     let weakView = view.unsafeWeakRef()
     highlighter = proc(source, language: string): seq[SyntaxTokenSpan] =
       if not weakView.isNil:
-        result = weakView[].xMatterHighlights.getOrDefault((source, language))
+        let index = weakView[].xMatterCodeIndices.getOrDefault((source, language), -1)
+        if index >= 0:
+          result = weakView[].xMatterHighlights[index]
   inc view.xMarkdownRenderGeneration
   let
     generation = view.xMarkdownRenderGeneration
@@ -2340,7 +2521,16 @@ proc completeMarkdownParse(
     view.xMarkdownParseError = parseResult.errorMessage
     if parseResult.errorMessage.len == 0:
       view.xMarkdownRoot = move parseResult.root
-      view.xMatterHighlights = move parseResult.highlights
+      view.xMatterCodeIndices.clear()
+      view.xMatterHighlights = newSeq[seq[SyntaxTokenSpan]](parseResult.codes.len)
+      for index, code in parseResult.codes:
+        view.xMatterCodeIndices[code] = index
+      if parseResult.codes.len > 0:
+        if view.xSyntaxHighlighter == SyntaxHighlighter(matterSyntaxHighlighter):
+          view.xActiveMarkdownHighlightGeneration = parseResult.generation
+          view.xMarkdownHighlightStarted = false
+        else:
+          emit view.xMarkdownParseWorker.cancelMarkdownHighlight(parseResult.generation)
       view.xMarkdownRootGeneration = parseResult.generation
       view.xPendingMarkdownCompletionGeneration = parseResult.generation
       view.scheduleMarkdownRendering()
@@ -2349,8 +2539,7 @@ proc completeMarkdownParse(
       emit view.markdownDidFinishParsing(parseResult.workerThreadId)
   if parseResult.generation != view.xMarkdownGeneration:
     view.startLatestMarkdownParse()
-  if view.xActiveMarkdownGeneration == 0:
-    view.releaseMarkdownViewAfterParsing()
+  view.finishMarkdownWork()
 
 proc ensureMarkdownParseWorker(view: MarkdownView) =
   if not view.xMarkdownParseWorker.isNil:
@@ -2361,6 +2550,13 @@ proc ensureMarkdownParseWorker(view: MarkdownView) =
     markdownParseFinished,
     view,
     MarkdownView.completeMarkdownParse(),
+  )
+
+  connectThreaded(
+    view.xMarkdownParseWorker,
+    markdownHighlightReady,
+    view,
+    MarkdownView.receiveMarkdownHighlight(),
   )
 
 proc startLatestMarkdownParse(view: MarkdownView) =
@@ -2390,12 +2586,21 @@ proc startLatestMarkdownParse(view: MarkdownView) =
     view.xPendingMarkdownCompletionGeneration = view.xMarkdownGeneration
     view.scheduleMarkdownRendering()
 
+proc cancelMarkdownColors(view: MarkdownView) =
+  if view.xActiveMarkdownHighlightGeneration != 0:
+    emit view.xMarkdownParseWorker.cancelMarkdownHighlight(
+      view.xActiveMarkdownHighlightGeneration
+    )
+    view.xActiveMarkdownHighlightGeneration = 0
+
 proc scheduleMarkdownParse(view: MarkdownView) =
+  view.cancelMarkdownColors()
   view.cancelMarkdownRendering()
   view.xPendingMarkdownCompletionGeneration = 0
   inc view.xMarkdownGeneration
   view.xMarkdownParseError.setLen(0)
   view.startLatestMarkdownParse()
+  view.finishMarkdownWork()
 
 proc renderCurrentMarkdownDocument(view: MarkdownView) =
   view.scheduleMarkdownRendering()
@@ -2406,8 +2611,11 @@ func isMarkdownRendering*(view: MarkdownView): bool =
     (view.xActiveMarkdownRenderGeneration != 0 or view.xMarkdownTableResizePending)
 
 func isMarkdownParsing*(view: MarkdownView): bool =
-  ## Return whether parsing or incremental AST application is in progress.
-  not view.isNil and (view.xActiveMarkdownGeneration != 0 or view.isMarkdownRendering())
+  ## Return whether structure parsing, code coloring or rendering is in progress.
+  not view.isNil and (
+    view.xActiveMarkdownGeneration != 0 or view.xActiveMarkdownHighlightGeneration != 0 or
+    view.isMarkdownRendering()
+  )
 
 func isMarkdownLayoutPending*(view: MarkdownView): bool =
   ## Return whether resize reflow is finishing on a text-layout worker.
@@ -2456,7 +2664,7 @@ proc waitForMarkdownRendering*(
 proc waitForMarkdownParsing*(
     view: MarkdownView, timeoutMilliseconds: Natural = 5_000
 ): bool {.discardable.} =
-  ## Poll until the latest parse and incremental application finish.
+  ## Poll until the latest parse, code colors and incremental application finish.
   let deadline = getMonoTime() + initDuration(milliseconds = timeoutMilliseconds)
   while getMonoTime() < deadline:
     discard view.pollMarkdownParsing()
@@ -2646,7 +2854,9 @@ proc `syntaxHighlighter=`*(view: MarkdownView, highlighter: SyntaxHighlighter) =
   if highlighter == SyntaxHighlighter(matterSyntaxHighlighter):
     view.scheduleMarkdownParse()
   else:
+    view.cancelMarkdownColors()
     view.renderCurrentMarkdownDocument()
+    view.finishMarkdownWork()
 
 proc markdownStyle*(view: MarkdownView): MarkdownStyle =
   ## Returns a copy of the current document presentation.

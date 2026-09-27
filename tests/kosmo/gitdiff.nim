@@ -167,7 +167,7 @@ suite "Kosmo Git diff":
     check panel.scrollView.contentOffset().y > 0
     check panel.markdownView.scrollView().contentOffset().y == 0
 
-  test "repository diffs load patches lazily and keep visible views bounded":
+  test "repository diffs load patches lazily and retain opened views":
     let root = createTempDir("kosmo-diff-lazy-views-", "")
     defer:
       removeDir(root)
@@ -197,10 +197,17 @@ suite "Kosmo Git diff":
     require panel.waitForDiff()
     check panel.snapshot.files[0].patchState == gdpsLoaded
     check panel.snapshot.files[0].patch.len > 0
+    let
+      firstView = panel.textViewForFile(0)
+      firstStorage = firstView.textStorage()
+    discard panel.textViewForFile(1)
+    require panel.waitForDiff()
     panel.layoutSubtreeIfNeeded()
     panel.scrollView.contentOffset = panel.scrollView.maximumContentOffset()
+    require panel.waitForDiff()
     panel.layoutSubtreeIfNeeded()
-    check panel.materializedViewCount() < panel.snapshot.files.len
+    check firstView.superview() == panel.documentView
+    check firstView.textStorage() == firstStorage
 
   test "Git diff metadata caps file rows":
     let root = createTempDir("kosmo-diff-file-limit-", "")
@@ -223,7 +230,7 @@ suite "Kosmo Git diff":
       panel.close()
     check "Only the first listed files are shown." in panel.markdownView.markdown()
 
-  test "expanding many files keeps views bounded and starts every diff request":
+  test "expanding all files materializes every requested diff":
     let root = createTempDir("kosmo-diff-expand-limit-", "")
     defer:
       removeDir(root)
@@ -243,7 +250,7 @@ suite "Kosmo Git diff":
     require panel.expandButton.sendAction()
     require panel.waitForDiff(timeoutMilliseconds = 30000)
     panel.layoutSubtreeIfNeeded()
-    check panel.materializedViewCount() <= GitDiffMaterializedSectionLimit * 2
+    check panel.materializedViewCount() == panel.snapshot.files.len * 2
     var foundGenerated = false
     for file in panel.snapshot.files:
       if file.path == "nifcache/generated.nim.c":
@@ -252,7 +259,7 @@ suite "Kosmo Git diff":
         check "+generated output" in file.patch
     check foundGenerated
 
-  test "scrolling expanded diffs materializes visible panels":
+  test "scrolling opened diffs retains their views and selection":
     let root = createTempDir("kosmo-diff-scroll-lazy-", "")
     defer:
       removeDir(root)
@@ -276,6 +283,13 @@ suite "Kosmo Git diff":
     require panel.waitForDiff()
     panel.layoutSubtreeIfNeeded()
     discard panel.buildRenders()
+    let
+      firstTextView = panel.textViewForFile(0)
+      firstStorage = firstTextView.textStorage()
+    firstTextView.selectedRange = initTextRange(2, 5)
+    discard panel.textViewForFile(panel.snapshot.files.high)
+    require panel.waitForDiff()
+    let initialHighlightCount = panel.highlightBuildCount()
 
     panel.scrollView.contentOffset = panel.scrollView.maximumContentOffset()
     var visibleCount: int
@@ -290,12 +304,174 @@ suite "Kosmo Git diff":
         break
       sleep(1)
     require visibleCount > 0
+    require panel.waitForDiff()
+    check firstTextView.superview() == panel.documentView
+    check firstTextView.textStorage() == firstStorage
+    check firstTextView.selectedRange == initTextRange(2, 5)
 
     panel.scrollView.contentOffset = initPoint(0, 0)
+    require panel.waitForDiff()
     panel.layoutSubtreeIfNeeded()
-    let firstTextView = panel.textViewForFile(0)
+    check panel.textViewForFile(0) == firstTextView
+    check panel.highlightBuildCount() == initialHighlightCount
     check not panel.isFileCollapsed(0)
     check firstTextView.frame().size.height > 24.0'f32
+
+  test "opened diff views exceed the former cap and detach only on collapse":
+    const fileCount = 140
+    var patch: string
+    for index in 0 ..< fileCount:
+      let path = "file" & $index & ".nim"
+      patch.add "diff --git a/" & path & " b/" & path & "\n" &
+        "@@ -1 +1 @@\n-let value = 0\n+let value = " & $index & "\n"
+    let panel = newKosmoGitDiffPanel(parseGitDiff(patch))
+    defer:
+      panel.close()
+    panel.frame = rect(0, 0, 600, 400)
+    panel.layoutSubtreeIfNeeded()
+    require panel.waitForDiff()
+    var views: seq[TextView]
+    for index in 0 ..< fileCount:
+      views.add panel.textViewForFile(index)
+    require panel.waitForDiff(timeoutMilliseconds = 60_000)
+    check panel.materializedViewCount() == fileCount * 2
+    for view in views:
+      check view.superview() == panel.documentView
+    let
+      firstStorage = views[0].textStorage()
+      initialHighlightCount = panel.highlightBuildCount()
+    views[0].selectedRange = initTextRange(2, 5)
+
+    for fraction in [1.0'f32, 0.0'f32, 0.5'f32]:
+      panel.scrollView.contentOffset =
+        initPoint(0.0'f32, panel.scrollView.maximumContentOffset().y * fraction)
+      require panel.waitForDiff()
+      check panel.materializedViewCount() == fileCount * 2
+      check views[0].superview() == panel.documentView
+      check views[0].textStorage() == firstStorage
+      check views[0].selectedRange == initTextRange(2, 5)
+      check panel.highlightBuildCount() == initialHighlightCount
+
+    panel.toggleFile(0)
+    require panel.waitForDiff()
+    check panel.isFileCollapsed(0)
+    check views[0].superview().isNil
+    check views[^1].superview() == panel.documentView
+    panel.toggleFile(0)
+    require panel.waitForDiff()
+    check "+let value = 0" in panel.textViewForFile(0).textStorage().stringValue()
+
+    require panel.collapseButton.sendAction()
+    require panel.waitForDiff()
+    for index, view in views:
+      check panel.isFileCollapsed(index)
+      check view.superview().isNil
+
+  test "scrolling opened sections skips layout and unchanged header invalidation":
+    const fileCount = 140
+    var patch: string
+    for index in 0 ..< fileCount:
+      let path = "file" & $index & ".txt"
+      patch.add "diff --git a/" & path & " b/" & path & "\n@@ -1 +1 @@\n-old\n+new\n"
+    let panel = newKosmoGitDiffPanel(parseGitDiff(patch))
+    defer:
+      panel.close()
+    panel.frame = rect(0, 0, 600, 400)
+    panel.layoutSubtreeIfNeeded()
+    require panel.waitForDiff(timeoutMilliseconds = 60_000)
+    require panel.expandButton.sendAction()
+    require panel.waitForDiff(timeoutMilliseconds = 60_000)
+    panel.layoutSubtreeIfNeeded()
+    require panel.waitForDiff(timeoutMilliseconds = 60_000)
+    let readyDeadline = getMonoTime() + initDuration(seconds = 60)
+    while getMonoTime() < readyDeadline:
+      discard panel.buildRenderScene()
+      require panel.waitForDiff(timeoutMilliseconds = 60_000)
+      if not panel.needsLayout() and not panel.needsDisplay():
+        break
+    require not panel.needsLayout()
+    require not panel.needsDisplay()
+    require panel.materializedViewCount() == fileCount * 2
+    var headers: seq[tuple[view: View, revision: uint64, frame: Rect]]
+    for child in panel.documentView.subviews():
+      if child of Button:
+        headers.add (child, child.xDisplayRevision, child.frame())
+    require headers.len == fileCount
+    let
+      documentRevision = panel.documentView.xDisplayRevision
+      documentFrame = panel.documentView.frame()
+      maxOffset = panel.scrollView.maximumContentOffset().y
+    require maxOffset > 1
+    for offset in [0.25'f32, 0.5'f32, maxOffset, maxOffset / 2, 0.0'f32]:
+      panel.scrollView.contentOffset = initPoint(0, offset)
+      require panel.waitForDiff(timeoutMilliseconds = 60_000)
+      check panel.documentView.xDisplayRevision == documentRevision
+      check panel.documentView.frame() == documentFrame
+      check panel.materializedViewCount() == fileCount * 2
+      for header in headers:
+        check header.view.xDisplayRevision == header.revision
+        check header.view.frame() == header.frame
+        check header.view.superview() == panel.documentView
+
+  test "scrolling collapsed sections materializes nearby headers without relayout":
+    const fileCount = 140
+    var patch: string
+    for index in 0 ..< fileCount:
+      let path = "file" & $index & ".txt"
+      patch.add "diff --git a/" & path & " b/" & path & "\n@@ -1 +1 @@\n-old\n+new\n"
+    let panel = newKosmoGitDiffPanel(parseGitDiff(patch))
+    defer:
+      panel.close()
+    panel.frame = rect(0, 0, 600, 400)
+    panel.layoutSubtreeIfNeeded()
+    require panel.waitForDiff(timeoutMilliseconds = 60_000)
+    require panel.collapseButton.sendAction()
+    require panel.waitForDiff(timeoutMilliseconds = 60_000)
+    panel.layoutSubtreeIfNeeded()
+    require panel.waitForDiff(timeoutMilliseconds = 60_000)
+    check panel.materializedViewCount() < fileCount
+    var foundLast = false
+    for child in panel.documentView.subviews():
+      if child.accessibilityIdentifier == "kosmo.gitDiff.file." & $(fileCount - 1):
+        foundLast = true
+    check not foundLast
+    panel.scrollView.contentOffset = panel.scrollView.maximumContentOffset()
+    require panel.waitForDiff(timeoutMilliseconds = 60_000)
+    var lastHeader: Button
+    for child in panel.documentView.subviews():
+      if child.accessibilityIdentifier == "kosmo.gitDiff.file." & $(fileCount - 1):
+        lastHeader = Button(child)
+    require not lastHeader.isNil
+    check not lastHeader.visibleRect().isEmpty
+    check panel.materializedViewCount() < fileCount
+    require lastHeader.sendAction()
+    require panel.waitForDiff(timeoutMilliseconds = 60_000)
+    check not panel.isFileCollapsed(fileCount - 1)
+    check "+new" in panel.textViewForFile(fileCount - 1).stringValue()
+
+  test "collapsing pending highlighting releases the view and finishes loading":
+    let panel = newKosmoGitDiffPanel(
+      GitDiffSnapshot(
+        source: gdsStandardInput,
+        files:
+          @[
+            GitFileDiff(
+              path: "pending.nim",
+              patch: "@@ -1 +1 @@\n-old\n+new\n",
+              syntaxPatch: "@@ -0,0 +1,10000 @@\n" & "+let value = 1\n".repeat(10000),
+            )
+          ],
+      )
+    )
+    defer:
+      panel.close()
+    let view = panel.textViewForFile(0)
+    require panel.highlightQueuedBytes() > 0
+    panel.toggleFile(0)
+    discard drainMainThreadWork()
+    require panel.waitForDiff()
+    check panel.isFileCollapsed(0)
+    check view.superview().isNil
 
   test "Expand All redraws completed background diff layouts":
     let panel = newKosmoGitDiffPanel(

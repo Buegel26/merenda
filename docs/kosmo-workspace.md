@@ -10,6 +10,10 @@ Scans run on NimKit's shared worker pool. Root changes and filesystem notificati
 invalidate older generations, and overlapping requests coalesce into one follow-up
 scan. A completed snapshot updates both views without resetting browser expansion
 or quick-open selection when the selected file still exists.
+Browser refreshes preserve the first visible file and its fractional row offset,
+including when files are inserted or removed above it, and keep selections tied
+to file paths. If the anchor file disappears, the browser retains the previous
+row position and clamps it to the remaining content.
 
 ## File and Git notifications
 
@@ -73,9 +77,15 @@ Document tab headers update their scroll range during pane layout. Resizing
 keeps the selected tab visible and clears stale offsets when all tabs fit.
 Layout passes at the same width preserve deliberate horizontal scrolling.
 
-The Git diff panel prepares native sections up to two viewport heights above
-and below the visible area, releasing sections farther away. The existing
-materialized-section and view-pool limits still bound the working set.
+The Git diff panel first prepares sections near the viewport. Once loaded, an
+expanded section keeps its text view, selection, highlighting, and layout as it
+scrolls out of view. Collapsing a section releases its text view; Expand All loads
+every requested section. Large diffs stay collapsed by default above 400 changed
+lines or 20 KiB of patch text, and generated files require an explicit request.
+Repository patch reads retain their per-file and aggregate byte limits.
+Scrolling reuses cached section positions and only prepares newly exposed
+sections outside the buffered viewport. Text layout and unchanged headers stay
+cached; content changes, disclosure changes, and resizing update section geometry.
 
 The Moe editor worker and NimKit's shared Matter highlighter parse lines up to
 1,024 bytes by default, including generated Nim declarations with long `importc`

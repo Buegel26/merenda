@@ -355,7 +355,7 @@ proc visibleContentRows(contentView: TableContentView): tuple[first, last: int]
 proc invalidateTableRows(tableView: TableView)
 proc rowHeight*(tableView: TableView): float32
 proc rowHeightForRow*(tableView: TableView, row: int): float32
-proc reloadData*(tableView: TableView)
+proc reloadData*(tableView: TableView, updateRows: proc() {.closure.} = nil)
 proc rowEnabled*(tableView: TableView, row: int): bool
 proc rowSelectable*(tableView: TableView, row: int): bool
 proc tableRowIdentifier*(tableView: TableView, row: int): string
@@ -378,7 +378,6 @@ proc rowOffset(tableView: TableView, index: int): float32
 proc rowIndexAtContentY(tableView: TableView, y: float32): int
 proc contentHeight(tableView: TableView): float32
 proc visibleRowsFrom(tableView: TableView, firstIndex: int, height: float32): int
-proc maxFirstVisibleIndex(tableView: TableView): int
 proc layoutTableContent(tableView: TableView)
 proc layoutTableContentIfNeeded(tableView: TableView)
 proc listContentOffset(tableView: TableView): Point
@@ -2409,13 +2408,6 @@ proc visibleRowsFrom(tableView: TableView, firstIndex: int, height: float32): in
     inc index
   max(count, 1)
 
-proc maxFirstVisibleIndex(tableView: TableView): int =
-  if tableView.len() <= 0:
-    return 0
-  tableView.rowIndexAtContentY(
-    max(tableView.contentHeight() - tableView.viewportSize().height, 0.0'f32)
-  )
-
 proc listContentOffset(tableView: TableView): Point =
   tableView.xScrollView.contentOffset()
 
@@ -3246,15 +3238,16 @@ proc clearPointerHighlights*(tableView: TableView) =
   tableView.clearPointerRowHighlight()
   tableView.clearPointerColumnHighlight()
 
-proc reloadData*(tableView: TableView) =
+proc reloadData*(tableView: TableView, updateRows: proc() {.closure.} = nil) =
+  ## Reloads rows while preserving selection identities and the viewport anchor.
+  ## `updateRows` runs once after the old state is captured, before fresh rows
+  ## are queried. Use it to replace source rows or invalidate a cached row list.
   tableView.xContentWidthMeasurementValid = false
   tableView.invalidateColumnWidthMeasurements()
   let
+    oldOffset = tableView.listContentOffset()
     oldFirst = tableView.firstVisibleIndex()
-    selectedWasVisible =
-      tableView.xSelectedIndex >= oldFirst and
-      tableView.xSelectedIndex < oldFirst + tableView.visibleItemCount()
-  let
+    offsetWithinRow = oldOffset.y - tableView.rowOffset(oldFirst)
     oldFirstIdentifier = tableView.tableRowIdentifier(oldFirst)
     selectedIdentifiers = tableView.rowIdentifiersForRows(tableView.xSelectedIndexes)
     anchorIdentifier = tableView.tableRowIdentifier(tableView.xSelectionAnchor)
@@ -3264,6 +3257,8 @@ proc reloadData*(tableView: TableView) =
         tableView.tableRowIdentifier(tableView.xEditing.row)
       else:
         ""
+  if not updateRows.isNil:
+    updateRows()
   tableView.clearTableCellSlots()
   tableView.invalidateRowHeightCache()
   tableView.setNeedsLayout()
@@ -3305,14 +3300,10 @@ proc reloadData*(tableView: TableView) =
       if row >= 0: row else: oldFirst
     else:
       oldFirst
+  # Preserve partially clipped rows and let the scroll view clamp to the new bounds.
   tableView.setTableContentOffset(
-    initPoint(
-      0.0'f32, tableView.rowOffset(min(restoredFirst, tableView.maxFirstVisibleIndex()))
-    ),
-    false,
+    initPoint(oldOffset.x, tableView.rowOffset(restoredFirst) + offsetWithinRow), false
   )
-  if selectedWasVisible and tableView.xSelectedIndex >= 0:
-    tableView.scrollItemToVisible(tableView.xSelectedIndex)
   tableView.invalidateIntrinsicContentSize()
   tableView.invalidateTableRows()
   tableView.layoutTableContentIfNeeded()
