@@ -94,6 +94,11 @@ suite "Kosmo live terminal clipboard":
       check pasteboard.plainText() == "unchanged"
 
       discard pasteboard.setPlainText("paste")
+      require pasteboard.plainText() == "paste"
+      # Exercise the Linux window binding even when this test runs on macOS.
+      frontend.window.addKeyBinding(
+        parseKeyStroke("ctrl-c"), actionSelector("kosmo.copy")
+      )
       check frontend.application.performMenuKeyEquivalent(pasteEvent)
       check frontend.window.dispatchKeyDown(terminalPasteEvent)
       check frontend.window.dispatchKeyDown(

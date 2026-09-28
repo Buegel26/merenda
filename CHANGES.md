@@ -12,7 +12,8 @@
 - Add an opt-in native terminal timing trace and standalone/Kosmo benchmarks.
   The terminal scheduler uses Terminex's budgeted polling and EOF distinction.
 - Keep Kosmo terminal clipboard shortcuts on the focused terminal when window
-  shortcuts use the same keys.
+  shortcuts use the same keys, and pass bare Ctrl+A/C/X/V through as terminal
+  input even where the window binds those keys to editing commands.
 
 - Refresh cached MonoText rows when horizontal scrolling exposes new columns,
   and recapture drawing slots that depend on changed view bounds.

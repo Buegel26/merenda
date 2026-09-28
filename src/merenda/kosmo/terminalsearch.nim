@@ -163,12 +163,14 @@ protocol KosmoTerminalKeyEquivalents of nimkit.ResponderCommandDispatchProtocol:
     let owner = view.window()
     if owner of nimkit.Window:
       let binding = nimkit.Window(owner).keyBindings().match([event])
-      let terminalClipboardShortcut =
-        event.modifiers == nimkit.terminalShortcutModifiers() and
-        event.key in {nimkit.keyA, nimkit.keyC, nimkit.keyX, nimkit.keyV}
-      # Clipboard shortcuts belong to the focused terminal. Other Kosmo
-      # commands still route through the window's bindings.
-      if not terminalClipboardShortcut and binding.kind == nimkit.kbmCommand and
+      let terminalInputShortcut =
+        event.key in {nimkit.keyA, nimkit.keyC, nimkit.keyX, nimkit.keyV} and (
+          event.modifiers == nimkit.terminalShortcutModifiers() or
+          event.modifiers == {nimkit.kmControl}
+        )
+      # Clipboard shortcuts and bare Ctrl input belong to the focused terminal.
+      # Other Kosmo commands still route through the window's bindings.
+      if not terminalInputShortcut and binding.kind == nimkit.kbmCommand and
           binding.selector.name.startsWith("kosmo."):
         return false
     nimkit.performTerminalKeyEquivalent(nimkit.TerminalView(view), event)
