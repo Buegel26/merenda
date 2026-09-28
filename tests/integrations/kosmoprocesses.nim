@@ -73,6 +73,10 @@ suite "Kosmo live terminal clipboard":
         primary = frontend.shortcutProfile().primaryModifiers()
         copyEvent = KeyEvent(key: keyC, keyCode: keyC.ord, modifiers: primary)
         pasteEvent = KeyEvent(key: keyV, keyCode: keyV.ord, modifiers: primary)
+        terminalCopyEvent =
+          KeyEvent(key: keyC, keyCode: keyC.ord, modifiers: terminalShortcutModifiers())
+        terminalPasteEvent =
+          KeyEvent(key: keyV, keyCode: keyV.ord, modifiers: terminalShortcutModifiers())
       check frontend.window.mouseDownAt(dragStart)
       check frontend.window.mouseDraggedAt(dragEnd)
       check frontend.window.mouseUpAt(dragEnd)
@@ -81,7 +85,7 @@ suite "Kosmo live terminal clipboard":
       check frontend.application.performMenuKeyEquivalent(copyEvent)
       check pasteboard.plainText() == "copy"
       discard pasteboard.setPlainText("stale")
-      require frontend.window.dispatchKeyDown(copyEvent)
+      require frontend.window.dispatchKeyDown(terminalCopyEvent)
       check pasteboard.plainText() == "copy"
 
       terminal.clearSelection()
@@ -91,7 +95,7 @@ suite "Kosmo live terminal clipboard":
 
       discard pasteboard.setPlainText("paste")
       check frontend.application.performMenuKeyEquivalent(pasteEvent)
-      check frontend.window.dispatchKeyDown(pasteEvent)
+      check frontend.window.dispatchKeyDown(terminalPasteEvent)
       check frontend.window.dispatchKeyDown(
         KeyEvent(key: keyC, keyCode: keyC.ord, modifiers: {kmControl})
       )
