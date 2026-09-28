@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Read terminal output in bounded application-frame work and coalesce grid
+  updates on fixed deadlines, keeping input and rendering responsive during
+  output bursts without adding a continuous idle frame timer.
+- Stop polling healthy idle PTYs; retain readiness notifications and slow
+  maintenance for cursor blinking, pending input, and exit after hangup.
+- Add an opt-in native terminal timing trace and standalone/Kosmo benchmarks.
+  The terminal scheduler uses Terminex's budgeted polling and EOF distinction.
+- Keep Kosmo terminal clipboard shortcuts on the focused terminal when window
+  shortcuts use the same keys.
+
 - Refresh cached MonoText rows when horizontal scrolling exposes new columns,
   and recapture drawing slots that depend on changed view bounds.
 - Transfer only changed scroll transforms and view ordering to the renderer,

@@ -2,6 +2,7 @@
 
 import sigils/core
 import terminex/[compactscrollback, termscreen, termsessions]
+import ../foundation/terminaltrace
 
 when defined(posix):
   import std/[posix, tables]
@@ -96,6 +97,7 @@ when defined(posix):
     if not reader.registration.armed:
       return
     reader.disarm()
+    recordTerminalTrace("ready", token)
     try:
       emit reader.readerReady(token)
     except Exception:
@@ -148,6 +150,7 @@ when defined(posix):
 
   proc outputReady(watch: TerminalOutputWatch, token: uint64) {.slot.} =
     if not watch.stopping and token == watch.token:
+      recordTerminalTrace("ui-ready", token)
       emit watch.terminalOutputReady(token)
 
   proc outputStarted(watch: TerminalOutputWatch, token: uint64) {.slot.} =

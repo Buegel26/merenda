@@ -26,7 +26,7 @@ proc terminalCellPoint(view: TerminalView, row, column: int): Point =
 
 suite "Kosmo live terminal clipboard":
   when defined(posix):
-    test "Edit menu copy and paste target the focused terminal":
+    test "Edit menu and key shortcuts target the focused Kosmo terminal":
       let
         app = newApplication("Kosmo Terminal Clipboard Test")
         frontend = newKosmoApplication(app, monitorsGitStatus = false)
@@ -34,12 +34,12 @@ suite "Kosmo live terminal clipboard":
           initTerminalSpawnOptions(
             command =
               "stty raw -echo; printf 'copy target\\nready\\n'; " &
-              "dd bs=1 count=6 2>/dev/null | od -An -tx1"
+              "dd bs=1 count=11 2>/dev/null | od -An -tx1"
           ),
           columns = 40,
           rows = 4,
         )
-        terminal = newTerminalView(session, frame = rect(0, 0, 400, 120))
+        terminal = newKosmoTerminalView(session, frame = rect(0, 0, 400, 120))
         pasteboard = generalPasteboard()
         previousClipboard = pasteboard.plainText()
       defer:
@@ -80,6 +80,9 @@ suite "Kosmo live terminal clipboard":
 
       check frontend.application.performMenuKeyEquivalent(copyEvent)
       check pasteboard.plainText() == "copy"
+      discard pasteboard.setPlainText("stale")
+      require frontend.window.dispatchKeyDown(copyEvent)
+      check pasteboard.plainText() == "copy"
 
       terminal.clearSelection()
       discard pasteboard.setPlainText("unchanged")
@@ -88,11 +91,12 @@ suite "Kosmo live terminal clipboard":
 
       discard pasteboard.setPlainText("paste")
       check frontend.application.performMenuKeyEquivalent(pasteEvent)
+      check frontend.window.dispatchKeyDown(pasteEvent)
       check frontend.window.dispatchKeyDown(
         KeyEvent(key: keyC, keyCode: keyC.ord, modifiers: {kmControl})
       )
-      require session.pollUntilText("70 61 73 74 65 03")
-      check "70 61 73 74 65 03" in
+      require session.pollUntilText("70 61 73 74 65 70 61 73 74 65 03")
+      check "70 61 73 74 65 70 61 73 74 65 03" in
         session.screen().plainText().splitWhitespace().join(" ")
 
     test "new terminals inherit the current terminal directory and follow it":

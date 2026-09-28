@@ -432,6 +432,10 @@ choices on the next launch; **Reset** restores the last saved values. You can
 also enable **Remember changes for future launches** to save each committed
 change automatically.
 
+Terminal tabs sleep on PTY readiness while idle and batch active output into
+bounded updates. For native timing measurements with `cmatrix` or `ps`, see
+[terminal latency diagnostics](docs/terminal-latency.md).
+
 Kosmo Settings → Moe Themes includes Catppuccin Latte, Catppuccin Mocha,
 Kanagawa Wave, One Dark, and Tokyo Night Moon. These themes are embedded in
 the executable and work from any launch directory. Add your own TOML themes
