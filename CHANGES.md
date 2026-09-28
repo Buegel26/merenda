@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `nim install_kosmo` to build and install the current checkout as a complete
+  macOS app bundle, using the release icon and resources.
 - Read terminal output in bounded application-frame work and coalesce grid
   updates on fixed deadlines, keeping input and rendering responsive during
   output bursts without adding a continuous idle frame timer.

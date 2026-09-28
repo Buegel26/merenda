@@ -502,6 +502,17 @@ nim c -o:kosmo src/merenda/kosmo/kosmo.nim
 
 On Windows, run `./kosmo.exe .` after compiling.
 
+On macOS, install the current checkout as a complete `Kosmo.app` with its icon,
+bundled notices, debug symbols, and local code signature:
+
+```sh
+nim install_kosmo
+```
+
+This uses Atlas to resolve dependencies, replaces `~/Applications/Kosmo.app`,
+and updates the `~/.local/bin/kosmo` link. Restart Kosmo if it was already
+running. Set `KOSMO_INSTALL_DIR` or `KOSMO_BIN_DIR` to choose other locations.
+
 ## Explore more
 
 The [examples directory](examples/) has complete apps you can run and change.

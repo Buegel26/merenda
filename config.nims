@@ -131,3 +131,6 @@ task download_references, "download local study copies of reference docs":
   downloadReference(openStepSpecUrl, openStepSpecPdf)
   echo "Downloaded ", openStepSpecPdf
   echo "OpenStep UI guidelines remain link-only; their notice restricts copying."
+
+task install_kosmo, "build and install the local macOS Kosmo.app":
+  exec("bash packaging/macos/install-local.sh")
