@@ -1,4 +1,4 @@
-version       = "0.25.0"
+version       = "0.25.1"
 author        = "Jaremy Creechley"
 description   = "Nim-native UI toolkit"
 license       = "BSD-3-Clause"
@@ -23,7 +23,8 @@ requires "faststreams >= 0.5.1"
 requires "gh:elcritch/nim-markdown#fix/arc-emphasis-ownership[regex]"
 # Compiled grammar ownership must reclaim recursive rules under ARC.
 requires "gh:elcritch/matter#80a1e67815da0e6af2d17a24d26378ae5ae0fdcc"
-requires "gh:elcritch/terminex >= 0.3.2"
+# Budgeted reads must preserve final output until the PTY has been drained.
+requires "gh:elcritch/terminex#143c79018554c4e81a329a9a898e176df0a92344"
 requires "gh:Araq/iconbundler"
 requires "libbacktrace"
 requires "zippy >= 0.10.20"

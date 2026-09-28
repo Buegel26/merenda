@@ -19,6 +19,7 @@ import ../drawing/images
 import ../drawing/rendering as nimkitRendering
 import ../drawing/renderscenes
 import ../foundation/events
+import ../foundation/terminaltrace
 import ../foundation/notifications
 import ../text/fieldeditors
 from ../text/textviews import
@@ -2526,6 +2527,10 @@ proc syncNativeGeometry(window: Window): Size =
 proc renderNativeWindow*(window: Window) =
   if not window.nativeReady:
     return
+
+  recordTerminalTrace("frame-start", cast[uint64](window))
+  defer:
+    recordTerminalTrace("frame-end", cast[uint64](window))
 
   window.xHostWindow.refreshContentScale()
   let logicalSize = window.syncNativeGeometry()

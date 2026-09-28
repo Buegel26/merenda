@@ -26,7 +26,7 @@ proc terminalCellPoint(view: TerminalView, row, column: int): Point =
 
 suite "Kosmo live terminal clipboard":
   when defined(posix):
-    test "Edit menu copy and paste target the focused terminal":
+    test "Edit menu and key shortcuts target the focused Kosmo terminal":
       let
         app = newApplication("Kosmo Terminal Clipboard Test")
         frontend = newKosmoApplication(app, monitorsGitStatus = false)
@@ -34,12 +34,12 @@ suite "Kosmo live terminal clipboard":
           initTerminalSpawnOptions(
             command =
               "stty raw -echo; printf 'copy target\\nready\\n'; " &
-              "dd bs=1 count=6 2>/dev/null | od -An -tx1"
+              "dd bs=1 count=11 2>/dev/null | od -An -tx1"
           ),
           columns = 40,
           rows = 4,
         )
-        terminal = newTerminalView(session, frame = rect(0, 0, 400, 120))
+        terminal = newKosmoTerminalView(session, frame = rect(0, 0, 400, 120))
         pasteboard = generalPasteboard()
         previousClipboard = pasteboard.plainText()
       defer:
@@ -73,12 +73,19 @@ suite "Kosmo live terminal clipboard":
         primary = frontend.shortcutProfile().primaryModifiers()
         copyEvent = KeyEvent(key: keyC, keyCode: keyC.ord, modifiers: primary)
         pasteEvent = KeyEvent(key: keyV, keyCode: keyV.ord, modifiers: primary)
+        terminalCopyEvent =
+          KeyEvent(key: keyC, keyCode: keyC.ord, modifiers: terminalShortcutModifiers())
+        terminalPasteEvent =
+          KeyEvent(key: keyV, keyCode: keyV.ord, modifiers: terminalShortcutModifiers())
       check frontend.window.mouseDownAt(dragStart)
       check frontend.window.mouseDraggedAt(dragEnd)
       check frontend.window.mouseUpAt(dragEnd)
       require terminal.selectionText() == "copy"
 
       check frontend.application.performMenuKeyEquivalent(copyEvent)
+      check pasteboard.plainText() == "copy"
+      discard pasteboard.setPlainText("stale")
+      require frontend.window.dispatchKeyDown(terminalCopyEvent)
       check pasteboard.plainText() == "copy"
 
       terminal.clearSelection()
@@ -87,12 +94,18 @@ suite "Kosmo live terminal clipboard":
       check pasteboard.plainText() == "unchanged"
 
       discard pasteboard.setPlainText("paste")
+      require pasteboard.plainText() == "paste"
+      # Exercise the Linux window binding even when this test runs on macOS.
+      frontend.window.addKeyBinding(
+        parseKeyStroke("ctrl-c"), actionSelector("kosmo.copy")
+      )
       check frontend.application.performMenuKeyEquivalent(pasteEvent)
+      check frontend.window.dispatchKeyDown(terminalPasteEvent)
       check frontend.window.dispatchKeyDown(
         KeyEvent(key: keyC, keyCode: keyC.ord, modifiers: {kmControl})
       )
-      require session.pollUntilText("70 61 73 74 65 03")
-      check "70 61 73 74 65 03" in
+      require session.pollUntilText("70 61 73 74 65 70 61 73 74 65 03")
+      check "70 61 73 74 65 70 61 73 74 65 03" in
         session.screen().plainText().splitWhitespace().join(" ")
 
     test "new terminals inherit the current terminal directory and follow it":

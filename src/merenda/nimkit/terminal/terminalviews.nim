@@ -1,6 +1,6 @@
 ## A reusable terminal-emulator view backed by Terminex.
 
-import std/[math, strutils, times, unicode]
+import std/[math, monotimes, strutils, times, unicode]
 
 import sigils/core
 import terminex/[compactscrollback, terminput, termscreen, termsessions]
@@ -8,6 +8,8 @@ import terminex/[compactscrollback, terminput, termscreen, termsessions]
 import ../app/[animations, pasteboards]
 import ../app/windows except performKeyEquivalent
 import ../foundation/[events, selectors, types, urls]
+import ../foundation/terminaltrace
+import ../foundation/mainthreadwork
 import ../responder/responders
 from ../text/textviews import isInsertableText
 import ../text/monotextviews
@@ -17,6 +19,10 @@ import ./terminalwatch
 const
   DefaultTerminalFontSize* = 14.0'f32
   DefaultTerminalPadding* = 4.0'f32
+  TerminalReadBudget = initDuration(milliseconds = 2)
+  TerminalBatchDelay = initDuration(milliseconds = 2)
+  TerminalFrameInterval = initDuration(milliseconds = 8)
+  TerminalActivePeriod = initDuration(milliseconds = 50)
 
 type
   TerminalPalette* = object
@@ -64,6 +70,10 @@ type
     xOutputWatch: TerminalOutputWatch
     xOutputWatchReady: bool
     xHeartbeat: Animation
+    xOutputFrame: Animation
+    xLastOutputFrame: MonoTime
+    xReadScheduled, xOutputClosed: bool
+    xOutputEpoch: uint64
     xPollingWindow: BackRef[Window]
 
 protocol TerminalViewEvents:
@@ -311,6 +321,7 @@ proc syncTerminalScreen(view: TerminalView)
 proc refreshHoveredLink(view: TerminalView): bool
 proc startTerminalPolling(view: TerminalView)
 proc stopTerminalPolling(view: TerminalView)
+proc scheduleTerminalFrame(view: TerminalView)
 
 proc `session=`*(view: TerminalView, session: TerminalViewSession) =
   let next =
@@ -689,6 +700,9 @@ proc terminalLineHeight(view: TerminalView): float32 =
 proc syncTerminalScreen(view: TerminalView) =
   if view.isNil or view.xSession.isNil:
     return
+  recordTerminalTrace("grid-start", cast[uint64](view))
+  defer:
+    recordTerminalTrace("grid-end", cast[uint64](view))
   let
     info = view.xSession.screenInfo()
     nextScrollbackCount = info.scrollbackCount
@@ -753,19 +767,36 @@ proc synchronizeMetadata(view: TerminalView) =
     let text = view.xSession.takeClipboardRequest()
     discard generalPasteboard().replaceWithPlainText(text)
 
-proc poll*(view: TerminalView): TerminexPollResult =
-  ## Drain available PTY output and synchronize the rendered grid.
+proc pollTerminal(
+    view: TerminalView, timeBudget: Duration, synchronize = true
+): TerminexPollResult =
   if view.isNil or view.xSession.isNil:
     return
-  result = view.xSession.poll()
+  recordTerminalTrace("poll-start", cast[uint64](view))
+  let
+    session = view.xSession
+    epoch = view.xOutputEpoch
+  result = session.poll(timeBudget = timeBudget)
+  view.xOutputClosed = result.outputClosed
+  recordTerminalTrace("poll-end", cast[uint64](view), result.bytesRead.uint64)
   let generation = view.xSession.screenInfo().generation
   if result.bytesRead > 0 or result.screenChanged or view.xLastGeneration != generation:
-    view.syncTerminalScreen()
+    if synchronize or result.processExited:
+      view.syncTerminalScreen()
+    else:
+      view.scheduleTerminalFrame()
   view.synchronizeMetadata()
+  if view.xSession != session or view.xOutputEpoch != epoch:
+    return
   if result.processExited and not view.xExitNotified:
     view.xExitNotified = true
-    emit view.terminalProcessDidExit(view.xSession.exitCode())
     view.stopTerminalPolling()
+    emit view.terminalProcessDidExit(session.exitCode())
+
+proc poll*(view: TerminalView): TerminexPollResult =
+  ## Synchronously drain available PTY output and synchronize the rendered grid.
+  ## Attached views automatically use bounded, coalesced output frames instead.
+  view.pollTerminal(initDuration())
 
 proc resizeToFit*(view: TerminalView) =
   if view.isNil or view.xSession.isNil:
@@ -1025,14 +1056,75 @@ proc rearmTerminalOutput(view: TerminalView, token: uint64) =
   if not view.xOutputWatch.isNil and view.xOutputWatch.token == token:
     view.xOutputWatch.rearm()
 
+proc terminalOutputFrameDue(view: TerminalView) {.slot.} =
+  # The scheduler removes the completed animation after this slot returns.
+  view.xOutputFrame = nil
+  if not view.xPollingWindow.isNil and not view.xSession.isNil:
+    view.xLastOutputFrame = getMonoTime()
+    view.syncTerminalScreen()
+
+proc scheduleTerminalFrame(view: TerminalView) =
+  let owner = view.xPollingWindow[]
+  if owner.isNil or not view.xOutputFrame.isNil:
+    return
+  let
+    now = getMonoTime()
+    batchDelay =
+      if now - view.xLastOutputFrame <= TerminalActivePeriod:
+        initDuration()
+      else:
+        TerminalBatchDelay
+    delay = max(batchDelay, view.xLastOutputFrame + TerminalFrameInterval - now)
+  # One fixed deadline batches small writes without a trailing debounce.
+  view.xOutputFrame = newAnimation(duration = delay)
+  view.xOutputFrame.cadence = eventCadence()
+  view.xOutputFrame.connect(finished, view, terminalOutputFrameDue)
+  discard owner.startAnimation(view.xOutputFrame)
+
+proc readTerminalOutput(view: TerminalView): bool =
+  let
+    owner = view.xPollingWindow[]
+    session = view.xSession
+    epoch = view.xOutputEpoch
+    token = if view.xOutputWatch.isNil: 0'u64 else: view.xOutputWatch.token
+  if owner.isNil or session.isNil:
+    return
+  let polled = view.pollTerminal(TerminalReadBudget, synchronize = false)
+  # Metadata and process-exit callbacks may close, detach, or replace the view.
+  if view.xOutputEpoch != epoch or view.xPollingWindow[] != owner or
+      view.xSession != session:
+    return
+  if not session.running():
+    # Callers may close the session directly while its view remains attached.
+    view.stopTerminalPolling()
+    return
+  view.xReadScheduled = polled.readPaused
+  if polled.readPaused:
+    return true
+  if not polled.outputClosed:
+    view.rearmTerminalOutput(token)
+
+proc scheduleTerminalRead(view: TerminalView) =
+  if view.xPollingWindow.isNil or view.xReadScheduled:
+    return
+  view.xReadScheduled = true
+  let
+    weakView = view.unsafeWeakRef()
+    epoch = view.xOutputEpoch
+  scheduleMainThreadWork(
+    proc(): bool =
+      if not weakView.isNil:
+        let current = weakView[]
+        if current.xOutputEpoch == epoch:
+          # One bounded chunk per application frame. Continuations yield to
+          # native input, animations and rendering before draining more output.
+          return current.readTerminalOutput()
+  )
+
 proc terminalOutputAvailable(view: TerminalView, token: uint64) {.slot.} =
   if view.xOutputWatch.isNil or view.xOutputWatch.token != token:
     return
-  let polled = view.poll()
-  # EOF can become readable before waitpid reports exit. Leave that watch
-  # disarmed until the maintenance tick instead of spinning on an empty PTY.
-  if polled.bytesRead > 0:
-    view.rearmTerminalOutput(token)
+  view.scheduleTerminalRead()
 
 proc terminalWatchStarted(view: TerminalView, token: uint64) {.slot.} =
   if view.xOutputWatch.isNil or view.xOutputWatch.token != token:
@@ -1053,12 +1145,11 @@ proc terminalTicked(view: TerminalView, delta: Duration) {.slot.} =
     return
   view.xMaintenanceElapsed = view.xMaintenanceElapsed + delta
   let maintenanceDue = view.xMaintenanceElapsed >= initDuration(milliseconds = 500)
-  if not view.xOutputWatchReady or maintenanceDue:
-    let token = if view.xOutputWatch.isNil: 0'u64 else: view.xOutputWatch.token
-    discard view.poll()
-    # Also flush pending input and collect child exit when no output arrives.
-    if maintenanceDue:
-      view.rearmTerminalOutput(token)
+  if not view.xOutputWatchReady or
+      (maintenanceDue and (view.xOutputClosed or view.xSession.pendingWriteBytes() > 0)):
+    # A healthy watcher handles output without idle PTY polling. Maintenance
+    # retries backpressured input and collects exit after an observed hangup.
+    view.scheduleTerminalRead()
   if maintenanceDue:
     view.xMaintenanceElapsed = initDuration()
     if view.xHasBlinkingText:
@@ -1106,8 +1197,15 @@ proc stopTerminalPolling(view: TerminalView) =
     owner.animationScheduler().disconnect(schedulerTicked, view, terminalTicked)
     if not view.xHeartbeat.isNil:
       discard owner.stopAnimation(view.xHeartbeat)
+    if not view.xOutputFrame.isNil:
+      discard owner.stopAnimation(view.xOutputFrame)
   view.xPollingWindow.clear()
   view.xHeartbeat = nil
+  view.xOutputFrame = nil
+  view.xLastOutputFrame = default(MonoTime)
+  view.xReadScheduled = false
+  view.xOutputClosed = false
+  inc view.xOutputEpoch
 
 proc startTerminalPolling(view: TerminalView) =
   if view.isNil or view.xSession.isNil or not view.xSession.running() or

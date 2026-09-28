@@ -10,6 +10,7 @@ when defined(macosx):
 
 import ../foundation/events
 import ../foundation/mainthreadwork
+import ../foundation/terminaltrace
 import ../foundation/notifications
 import ../controls/menus
 import ../controls/fontpickers
@@ -1320,6 +1321,9 @@ proc windowBlockedByModal*(app: Application, window: Window): bool =
     window == session.parentWindow
 
 proc runApplicationFrame(app: Application): int =
+  recordTerminalTrace("application-frame-start")
+  defer:
+    recordTerminalTrace("application-frame-end")
   when defined(macosx):
     # Native event polling has its own pool, but queued work, animations and
     # window updates below also create autoreleased Cocoa objects.
@@ -1366,6 +1370,9 @@ proc prepareApplicationEventLoop(app: Application) =
     startLocalThreadDefault()
 
 proc pollApplicationEvents(app: Application) =
+  recordTerminalTrace("native-poll-start")
+  defer:
+    recordTerminalTrace("native-poll-end")
   # Native damage schedules onRender; event activity alone does not dirty views.
   for window in app.xWindows:
     if not window.isNil and window.isVisible and window.nativeReady:
@@ -1375,6 +1382,9 @@ proc pollApplicationEvents(app: Application) =
 proc waitForApplicationEvents(app: Application) =
   if hasPendingMainThreadWork():
     return
+  recordTerminalTrace("native-wait-start")
+  defer:
+    recordTerminalTrace("native-wait-end")
   if hasLocalSigilThread():
     nimkitBackend.installNativeEventLoopWaker(getCurrentSigilThread())
   let

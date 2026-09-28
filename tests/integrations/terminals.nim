@@ -10,6 +10,7 @@ import sigils/[core, threads]
 import merenda/nimkit/accessibility/accessibilityprotocols
 import merenda/nimkit/app/[animations, application, pasteboards, windows]
 import merenda/nimkit/foundation/[events, selectors, types]
+import merenda/nimkit/foundation/mainthreadwork
 import merenda/nimkit/responder/responders
 import merenda/nimkit/terminal/terminalviews
 import merenda/nimkit/text/monotextviews
@@ -77,6 +78,7 @@ proc tickUntilNormalizedText(
   let deadline = getMonoTime() + timeout
   while getMonoTime() < deadline:
     discard getCurrentSigilThread().pollAll(NonBlocking)
+    discard drainMainThreadWork()
     discard window.animationScheduler().tick(initDuration(milliseconds = 16))
     let rendered = view.stringValue().replace("\n", " ").splitWhitespace().join(" ")
     if expected in rendered:
@@ -130,6 +132,7 @@ proc tickUntilCurrentLineContains(
   let deadline = getMonoTime() + timeout
   while getMonoTime() < deadline:
     discard getCurrentSigilThread().pollAll(NonBlocking)
+    discard drainMainThreadWork()
     discard window.animationScheduler().tick(initDuration(milliseconds = 16))
     if expected in view.session().currentTerminalLine():
       return true
@@ -145,6 +148,7 @@ proc tickUntilCurrentLineAfterChange(
   let deadline = getMonoTime() + timeout
   while getMonoTime() < deadline:
     discard getCurrentSigilThread().pollAll(NonBlocking)
+    discard drainMainThreadWork()
     discard window.animationScheduler().tick(initDuration(milliseconds = 16))
     if view.session().screenInfo().generation != generation and
         view.session().currentTerminalLine() == expected:
@@ -1427,6 +1431,7 @@ suite "nimkit terminal views":
       while ("automatic" notin view.stringValue() or session.running()) and
           getMonoTime() < deadline:
         discard getCurrentSigilThread().pollAll(NonBlocking)
+        discard drainMainThreadWork()
         discard window.animationScheduler().tick(initDuration(milliseconds = 16))
         sleep(5)
 
