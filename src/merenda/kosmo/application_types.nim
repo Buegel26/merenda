@@ -35,7 +35,9 @@ type
 
   KosmoPaneIndicator = ref object of nimkit.View
 
-  KosmoMarkdownView = ref object of nimkit.MarkdownView
+  KosmoMarkdownView* = ref object of nimkit.MarkdownView
+    search: KosmoViewerSearch
+    pendingSearchRange: Option[nimkit.TextRange]
     editorView: WeakRef[KosmoEditorView]
 
   KosmoMarkdownPreview = object
@@ -161,7 +163,7 @@ type
     fileTreeWidth: float32
     onShowFileExplorer: proc() {.closure.}
     onRevealActiveFile: proc() {.closure.}
-    onFindInFiles: proc() {.closure.}
+    onFindInFiles: proc(replacing: bool) {.closure.}
     onQuickOpen: proc() {.closure.}
     onNewTerminal: proc() {.closure.}
     onFocusPanel: proc(panelNumber: int) {.closure.}
