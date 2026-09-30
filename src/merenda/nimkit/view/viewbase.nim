@@ -142,7 +142,8 @@ type
     xOwningViewRef*: BackRef[View]
 
   LayoutTerm* = object
-    item*: View
+    ## Generated equations describe views without extending their lifetimes.
+    xItemRef*: BackRef[View]
     attribute*: LayoutAttribute
     multiplier*: float32
 
@@ -265,6 +266,13 @@ type
     xCachedAppearanceGeneration*: ThemeGeneration
     xHasCachedRenders*: bool
 
+proc item*(term: LayoutTerm): View =
+  ## Returns nil after the referenced view has been destroyed.
+  term.xItemRef.target
+
+proc `item=`*(term: var LayoutTerm, item: View) =
+  term.xItemRef.target = item
+
 proc defaultLayoutSolveLimits*(): LayoutSolveLimits =
   ## Conservative interactive defaults for a single layout transaction.
   ##
@@ -281,11 +289,11 @@ proc defaultLayoutSolveLimits*(): LayoutSolveLimits =
 
 proc superviewBacklink*(view: View): View {.inline.} =
   if not view.isNil and not view.xSuperview.isNil:
-    result = view.xSuperview[]
+    result = view.xSuperview.target
 
 proc windowBacklink*(view: View): Responder {.inline.} =
   if not view.isNil and not view.xWindow.isNil:
-    result = view.xWindow[]
+    result = view.xWindow.target
 
 var activeLayoutTransaction* {.threadvar.}: ptr LayoutTransactionState
 var layoutGenerationCounter {.threadvar.}: Natural
