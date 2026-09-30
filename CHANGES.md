@@ -41,6 +41,10 @@
 - Add plain-text search to Markdown and Git diff viewers, including collapsed diff
   sections, and center editor search matches through Kosmo's Moe adapter.
 
+- Pause automatic layout retries after sixteen consecutive unsettled NimKit
+  transactions, retaining the warning at three cycles and the pending work.
+  Per-root feedback limits are configurable; new external layout input retries
+  blocked roots without letting layout callbacks reset their own limit.
 - Add `nim install_kosmo` to build and install the current checkout as a complete
   macOS app bundle, using the release icon and resources.
 - Read terminal output in bounded application-frame work and coalesce grid
