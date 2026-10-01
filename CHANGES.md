@@ -13,6 +13,14 @@
 - Apply streamed Markdown syntax colors with indexed range updates and local
   run changes, preserving quote styles, undo, and edit notifications while
   reducing work on large documents.
+- Pin Moe to upstream develop at `22c74002`, including the host result hook
+  merged in PR #3332, so Ex commands, runtime mappings, and Filer split-open
+  requests can use Kosmo's document tabs and dock panes.
+- Route `:split`/`:vsplit` and `:new`/`:vnew` to Kosmo panes, preserving the
+  source buffer and cursor. Keep interactive Config state in a reusable tab
+  without a hidden Moe split, and honor Moe runtime mappings for Ctrl-W.
+- Dispatch ambiguous Moe key mappings from Kosmo's idle poll when their
+  configured timeout expires.
 - Consolidate macOS workspace watches into FSEvents streams for whole trees,
   preventing nested folders in multiple projects from exhausting dmon's global
   watch limit. Deduplicate roots, report fallback causes and uncovered paths,
