@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Batch matching terminal glyph styles within each changed row and skip blank
+  glyphs while retaining their backgrounds and decorations. Defer frame
+  construction while the renderer is occupied, and schedule the first terminal
+  update after idle without an extra batching delay.
+
 - Make `BackRef` a reference object with shared registrations and independent
   rebinding. Read and assign targets through `handle.target`, replacing `handle[]`.
 - Save Kosmo configuration and Tekton resource documents through checked

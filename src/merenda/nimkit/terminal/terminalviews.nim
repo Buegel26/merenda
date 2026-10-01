@@ -20,9 +20,7 @@ const
   DefaultTerminalFontSize* = 14.0'f32
   DefaultTerminalPadding* = 4.0'f32
   TerminalReadBudget = initDuration(milliseconds = 2)
-  TerminalBatchDelay = initDuration(milliseconds = 2)
   TerminalFrameInterval = initDuration(milliseconds = 8)
-  TerminalActivePeriod = initDuration(milliseconds = 50)
 
 type
   TerminalPalette* = object
@@ -1069,13 +1067,10 @@ proc scheduleTerminalFrame(view: TerminalView) =
     return
   let
     now = getMonoTime()
-    batchDelay =
-      if now - view.xLastOutputFrame <= TerminalActivePeriod:
-        initDuration()
-      else:
-        TerminalBatchDelay
-    delay = max(batchDelay, view.xLastOutputFrame + TerminalFrameInterval - now)
-  # One fixed deadline batches small writes without a trailing debounce.
+    interval = min(TerminalFrameInterval, owner.animationScheduler().frameInterval)
+    delay = max(initDuration(), view.xLastOutputFrame + interval - now)
+  # The first output after idle is immediate. During a burst one fixed deadline
+  # follows the window's configured cadence without postponing the final update.
   view.xOutputFrame = newAnimation(duration = delay)
   view.xOutputFrame.cadence = eventCadence()
   view.xOutputFrame.connect(finished, view, terminalOutputFrameDue)

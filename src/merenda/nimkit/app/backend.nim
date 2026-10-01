@@ -499,6 +499,7 @@ proc submitRenderScene*(
 proc acknowledgeRender*(host: ThreadHostClient, renderId: uint64) =
   if host.isNil or renderId == 0:
     return
+  host.renderRequested = renderId < host.nextRenderId
   while host.pendingResources.len > 0 and
       host.pendingResources.peekFirst().renderId <= renderId:
     var lease = host.pendingResources.popFirst()

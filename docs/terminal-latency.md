@@ -8,6 +8,7 @@ tests/benchmark_terminal_native cmatrix terminal /tmp/terminal-cmatrix.jsonl
 tests/benchmark_terminal_native ps terminal /tmp/terminal-ps.jsonl
 tests/benchmark_terminal_native cmatrix kosmo /tmp/kosmo-cmatrix.jsonl
 tests/benchmark_terminal_native ps kosmo /tmp/kosmo-ps.jsonl
+tests/benchmark_terminal_native burst kosmo /tmp/kosmo-burst.jsonl
 python3 tests/benchmarks/terminal_trace_summary.py /tmp/kosmo-cmatrix.jsonl /tmp/kosmo-ps.jsonl
 ```
 
@@ -17,7 +18,9 @@ for a PTY handshake, measures one second of idle process CPU, then observes
 three seconds of output through `Application.run()` and its blocking native
 event loop. The terminal has no keyboard focus, excluding cursor blinking from
 the idle sample. The `ps` workload runs twelve commands separated by 150 ms; those
-intentional gaps must not be interpreted as presentation stalls.
+intentional gaps must not be interpreted as presentation stalls. The `burst`
+workload emits 10,000 lines and a final marker without intentional gaps. The
+probe reports both idle and active process CPU as a percentage of one core.
 
 The trace records monotonic timestamps, thread IDs, object identities and byte
 counts. It never records terminal contents. Instrumentation compiles out unless
@@ -93,10 +96,9 @@ gives it a 2 ms parsing budget, checked between Terminex read chunks. A chunk
 can exceed that budget; it is a cooperative bound, not a hard deadline.
 Continuations yield to native input, animations and window rendering.
 
-Reading and presentation are independent. The first grid update is scheduled
-2 ms after output arrives, with at least 8 ms between grid updates during a
-burst. Output within 50 ms of the previous grid update skips the initial
-batching delay, so ongoing animation is paced without a delay on every read.
+Reading and presentation are independent. The first grid update after idle is
+scheduled immediately, with at least 8 ms between grid updates during a burst
+(or the window's configured animation interval if it is shorter).
 Further output keeps the same pending deadline instead of postponing
 it. Final output is synchronized before publishing process exit. Closing,
 detaching or replacing a session invalidates pending work and cancels its frame.
@@ -105,6 +107,20 @@ A healthy idle terminal does not poll its PTY or run a fast frame timer. The
 500 ms heartbeat handles blinking and retries pending input or process exit
 after a hangup. Systems without a working readiness watch retain the existing
 animation-driven polling fallback, with the same bounded read work.
+
+## Frame construction and row drawing
+
+A changed row groups nonadjacent glyphs with matching color, weight and italic
+style into the same text operation, preserving each cell's horizontal position.
+Blank and hidden cells still paint backgrounds and decorations but allocate no
+glyph arrangement. Unchanged rows retain their existing render slots.
+
+Native windows defer construction of another frame while a dedicated renderer
+submission is outstanding. Dirty views and native damage remain pending;
+renderer completion wakes the application to build the newest state. An older
+completion cannot mark a newer submission complete. This gate avoids building
+frames merely to replace them in the renderer's latest-frame queue, without a
+new periodic idle timer.
 
 ## Dependency change
 
