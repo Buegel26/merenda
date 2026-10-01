@@ -8,43 +8,25 @@ type
   BackRefSlot = object
     target: pointer
     backRefs: ptr BackRefSetCore
+    index: int
 
-  BackRef*[T] = object
+  BackRef*[T] = ref object
     ## Non-owning reference cleared when its target's ``BackRefSet`` is destroyed.
+    ## Copies share a stable registration. Setting or clearing a handle replaces
+    ## that handle without changing its copies. Access stays on the target's thread.
     slot: BackRefSlot
 
-proc removeSlot(backRefs: ptr BackRefSetCore, slot: ptr BackRefSlot) {.raises: [].} =
-  if backRefs.isNil:
-    return
-  for index in 0 ..< backRefs.slots.len:
-    if backRefs.slots[index] == slot:
-      backRefs.slots.delete(index)
-      return
-
-proc addSlot(backRefs: ptr BackRefSetCore, slot: ptr BackRefSlot) {.raises: [].} =
-  if backRefs.isNil:
-    return
-  for registered in backRefs.slots:
-    if registered == slot:
-      return
-  backRefs.slots.add slot
-
-proc replaceSlot(
-    backRefs: ptr BackRefSetCore, oldSlot, newSlot: ptr BackRefSlot
-) {.raises: [].} =
-  if backRefs.isNil:
-    return
-  for index in 0 ..< backRefs.slots.len:
-    if backRefs.slots[index] == oldSlot:
-      backRefs.slots[index] = newSlot
-      return
-  backRefs.addSlot(newSlot)
-
-proc unregister(slot: var BackRefSlot) {.raises: [].} =
+proc `=destroy`(slot: BackRefSlot) {.raises: [].} =
   if not slot.backRefs.isNil:
-    slot.backRefs.removeSlot(addr slot)
-  slot.target = nil
-  slot.backRefs = nil
+    let last = slot.backRefs.slots.pop()
+    if slot.index < slot.backRefs.slots.len:
+      slot.backRefs.slots[slot.index] = last
+      last.index = slot.index
+
+# The registration must stay inside its original heap object.
+proc `=copy`(dest: var BackRefSlot, src: BackRefSlot) {.error.}
+proc `=dup`(src: BackRefSlot): BackRefSlot {.error.}
+proc `=sink`(dest: var BackRefSlot, src: BackRefSlot) {.error.}
 
 proc `=destroy`*[T](backRefs: var BackRefSet[T]) {.raises: [].} =
   while backRefs.core.slots.len > 0:
@@ -56,42 +38,27 @@ proc `=destroy`*[T](backRefs: var BackRefSet[T]) {.raises: [].} =
 proc `=copy`*[T](dest: var BackRefSet[T], src: BackRefSet[T]) {.error.}
 proc `=sink`*[T](dest: var BackRefSet[T], src: BackRefSet[T]) {.error.}
 
-proc `=destroy`*[T](backRef: var BackRef[T]) {.raises: [].} =
-  backRef.slot.unregister()
-
-proc `=wasMoved`*[T](backRef: var BackRef[T]) {.inline.} =
-  backRef.slot = BackRefSlot()
-
-proc `=copy`*[T](dest: var BackRef[T], src: BackRef[T]) {.raises: [].} =
-  if cast[pointer](addr dest) == cast[pointer](unsafeAddr src):
-    return
-  dest.slot.unregister()
-  dest.slot = src.slot
-  if not dest.slot.backRefs.isNil:
-    dest.slot.backRefs.addSlot(addr dest.slot)
-
-proc `=sink`*[T](dest: var BackRef[T], src: BackRef[T]) {.raises: [].} =
-  dest.slot.unregister()
-  dest.slot = src.slot
-  if not dest.slot.backRefs.isNil:
-    dest.slot.backRefs.replaceSlot(unsafeAddr src.slot, addr dest.slot)
-  cast[ptr BackRef[T]](unsafeAddr src)[].slot = BackRefSlot()
-
 proc clear*[T](backRef: var BackRef[T]) {.inline.} =
-  backRef.slot.unregister()
+  backRef = nil
 
 proc set*[T, U](backRef: var BackRef[T], target: T, backRefs: var BackRefSet[U]) =
-  if cast[pointer](target) == backRef.slot.target:
-    return
-  backRef.slot.unregister()
   if target.isNil:
+    backRef.clear()
     return
-  backRef.slot.target = cast[pointer](target)
-  backRef.slot.backRefs = addr backRefs.core
-  backRef.slot.backRefs.addSlot(addr backRef.slot)
+  if backRef != nil and cast[pointer](target) == backRef.slot.target:
+    return
+  let replacement = BackRef[T]()
+  replacement.slot.target = cast[pointer](target)
+  replacement.slot.backRefs = addr backRefs.core
+  replacement.slot.index = backRefs.core.slots.len
+  backRefs.core.slots.add addr replacement.slot
+  backRef = replacement
 
-proc `[]`*[T](backRef: BackRef[T]): T {.inline.} =
-  result = cast[T](backRef.slot.target)
+proc target*[T](backRef: BackRef[T]): T {.inline.} =
+  ## Returns the target, or nil if the handle is empty or the target has died.
+  if backRef != nil:
+    result = cast[T](backRef.slot.target)
 
 proc isNil*[T](backRef: BackRef[T]): bool {.inline.} =
-  backRef.slot.target.isNil
+  ## Tests the target's lifetime, including handles whose registration survives it.
+  backRef == nil or backRef.slot.target.isNil

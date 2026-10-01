@@ -1,6 +1,11 @@
 ## Shared runner for tests requiring cross-component or process-level integration.
+import integrations/fixtures/atomicsavefailure
+import integrations/processdescriptors
+import integrations/atomicsaves
 import integrations/application_sigils
 import integrations/figdraw_text_offsets
+import integrations/gitprocesslifecycle
+import integrations/kosmoprocesses
 import integrations/kosmocliopen
 import integrations/kosmoterminalenvironment
 import integrations/nativewindowactivation
@@ -8,6 +13,7 @@ import integrations/nativewindowlifecycle
 import integrations/nativewindowrepaint
 import integrations/nativewindowscale
 import integrations/urlassets
+import integrations/terminalwatch
 import integrations/terminals
 import integrations/resourcelifetimes
 import integrations/backgroundworkershutdown

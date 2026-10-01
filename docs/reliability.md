@@ -15,6 +15,12 @@ runtime housekeeping.
 RSS and total threads are diagnostic checkpoints: native drivers create
 housekeeping threads lazily, so thread count is not an owned-worker count.
 
+The same runner also exercises eight repeated editor, Git diff, and Markdown
+lifetimes, including three Git refreshes per cycle. It checks descriptor and
+child counts after closing the documents. This bounded check passes on macOS;
+the reported 0.24.0 descriptor-exhaustion crash remains under investigation in
+`PLAN.md`.
+
 `processResourceUsage()` in `merenda/nimkit/app/diagnostics` reports current and
 peak resident bytes, open descriptor count, child count, and thread count on
 macOS and Linux. Unavailable fields are `-1`. These are observations of the
@@ -38,8 +44,36 @@ one-view updates from 1,145,272 to 25,296 bytes (97.8%). Full updates grew from
 The receiving thread expands the list temporarily while reconciling; the savings
 apply to queued snapshots, not every allocation in a rendered frame.
 
+The scrolling regression in `tests/nimkit/renderfragments.nim` places 1,000
+children under one scrolling ancestor. On 2026-09-27, skipping unchanged child
+transforms and placement ordering reduced its update from 1,170,360 to 1,144
+bytes. Only the viewport's transforms change, and placement-only frames retain
+their resource manifest. Coverage also compares renderer replicas with fresh
+drawing after horizontal text scrolling, bounds changes, explicit-layer moves,
+and coalesced view-order changes. Git diff regressions verify that scrolling 140
+opened sections leaves header revisions and document geometry unchanged.
+
 RSS can stay high after objects are freed because allocators retain pages;
 compare repeated warmed runs and resource counts before calling that a leak.
+
+## Streamed Markdown syntax coloring
+
+`tests/benchmark_markdown_styling.nim` measures application of 64-line syntax
+color batches to a text storage containing 8,000–32,000 lines. Construction and
+tokenization are outside the timed section. Each figure below is the median of
+five runs after one warmup on macOS/arm64 with Nim 2.2.12 in release mode:
+
+| Lines | Plain before | Plain after | Quoted before | Quoted after |
+| ---: | ---: | ---: | ---: | ---: |
+| 8,000 | 140 ms | 9 ms | 217 ms | 14 ms |
+| 16,000 | 545 ms | 19 ms | 875 ms | 29 ms |
+| 32,000 | 2,162 ms | 38 ms | 3,367 ms | 57 ms |
+
+Forward streamed batches now use indexed run lookup and local run changes.
+Alternating edits at distant positions can still move the run gap across the
+document. The benchmark checks token and quote colors and one storage revision
+per batch; the NimKit text-storage tests cover undo, overlap precedence, style
+reuse, and edit notifications.
 
 ## Bounded URL loading
 
@@ -75,6 +109,18 @@ fragment updates, and renderer-thread resource ownership. Full GUI integration s
 runs separately. Sanitizers complement the observable lifecycle assertions;
 they do not establish a universal RSS ceiling or prove absence of every leak.
 
+Generated layout terms use non-owning back references. The ownership subset checks
+that standalone, detached, and reparented view trees release after layout, and
+that copied, moved, and sequence-stored back references clear when their target
+dies. `BackRef` handles share a registration allocated as a Nim reference object;
+copying a handle does not allocate another registration. Setting `handle.target`
+or calling `clear` replaces only that handle. The registry and target links remain
+non-owning, and the last handle unregisters its slot when released. Read the target
+through `handle.target` and test its lifetime with `handle.isNil`; comparing the
+handle itself to `nil` only tests whether a registration is allocated.
+ARC and ORC sanitizer runs passed these cases on macOS with stack-use-after-return
+detection enabled.
+
 Metal/Vulkan renderers support dedicated rendering under both ARC and ORC.
 An earlier ORC cycle-root unregister crash came from moving a renderer while it
 was still registered in the creating thread's cycle-candidate buffer. Renderer
@@ -106,12 +152,10 @@ Requesting worker shutdown alone does not satisfy that condition: the worker
 publishes a separate completion flag after releasing its hosts. Switching render
 runtimes also waits for the old host to be released.
 
-The acyclic render-data annotations and Siwin borrow are in
-[FigDraw PR #96](https://github.com/elcritch/figdraw/pull/96), along with
-`finishPendingFrames`. Merenda tracks its `fix/acyclic-render-ownership` branch
-until these changes are released as FigDraw 0.43.0. FigDraw is compiled directly
-into the application; Merenda's
-experimental native dynlib mode has been removed.
+The acyclic render-data annotations, Siwin borrow, and
+`finishPendingFrames` are in [FigDraw 0.43.0](https://github.com/elcritch/figdraw/releases/tag/v0.43.0).
+FigDraw is compiled directly into the application; Merenda's experimental
+native dynlib mode has been removed.
 
 This ordering is validated on macOS. Siwin's Windows/X11 OS-close notification
 paths can run after native teardown starts;

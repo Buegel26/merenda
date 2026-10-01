@@ -14,28 +14,13 @@ type
     keckSyntax
     keckMarkdownPreview
 
-  KosmoPaneCommand = enum
-    kpcNone
-    kpcSplitBelow
-    kpcSplitRight
-    kpcNewBelow
-    kpcFocusNext
-    kpcFocusLeft
-    kpcFocusBelow
-    kpcFocusAbove
-    kpcFocusRight
-    kpcClose
-    kpcGrowHeight
-    kpcShrinkHeight
-    kpcShrinkWidth
-    kpcGrowWidth
-    kpcEqualize
-
   KosmoCommandBar* = ref object of nimkit.MonoTextView
 
   KosmoPaneIndicator = ref object of nimkit.View
 
-  KosmoMarkdownView = ref object of nimkit.MarkdownView
+  KosmoMarkdownView* = ref object of nimkit.MarkdownView
+    search: KosmoViewerSearch
+    pendingSearchRange: Option[nimkit.TextRange]
     editorView: WeakRef[KosmoEditorView]
 
   KosmoMarkdownPreview = object
@@ -74,7 +59,6 @@ type
     matterRefreshPending: bool
     matterRefreshActive: bool
     inactiveRefreshDeferred: bool
-    hostHelpVisible: bool
 
   KosmoEditorTabsHandler = ref object of nimkit.Responder
     editorView: WeakRef[KosmoEditorView]
@@ -86,9 +70,6 @@ type
     editorView*: KosmoEditorView
     commandBar*: KosmoCommandBar
     markdownView*: KosmoMarkdownView
-    helpView: KosmoMarkdownView
-    helpPanel: nimkit.Box
-    helpCloseButton: nimkit.Button
     popupList: nimkit.PopupListView
     popupMenuState: Option[KosmoPopupMenu]
     popupHighlightedIndex: int
@@ -146,15 +127,26 @@ type
     editorInputPolicy: KosmoEditorInputPolicy
     xSidebarFocused: bool
 
+  KosmoStatusIconButton = ref object of nimkit.Button
+    icon: nimkit.SvgMtsdfResource
+    selected: bool
+
+  KosmoStatusBar = ref object of nimkit.View
+    label: nimkit.Label
+    fileButton: KosmoStatusIconButton
+    findButton: KosmoStatusIconButton
+    observedWindow: WeakRef[nimkit.Window]
+
   KosmoContentView = ref object of nimkit.View
     splitView: nimkit.SplitView
+    statusBar: KosmoStatusBar
     statusLabel: nimkit.Label
     setInitialDivider: bool
     lastSplitWidth: float32
     fileTreeWidth: float32
     onShowFileExplorer: proc() {.closure.}
     onRevealActiveFile: proc() {.closure.}
-    onFindInFiles: proc() {.closure.}
+    onFindInFiles: proc(replacing: bool) {.closure.}
     onQuickOpen: proc() {.closure.}
     onNewTerminal: proc() {.closure.}
     onFocusPanel: proc(panelNumber: int) {.closure.}
@@ -162,6 +154,7 @@ type
 
   KosmoDetachedContentView = ref object of nimkit.View
     workspace: nimkit.DockView
+    statusBar: KosmoStatusBar
     statusLabel: nimkit.Label
 
   KosmoWindowManager* = ref object

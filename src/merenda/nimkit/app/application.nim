@@ -4,8 +4,13 @@ import sigils/selectors
 import sigils/threadBase
 import sigils/threadDefault
 
+when defined(macosx):
+  import darwin/foundation/nsautoreleasepool
+  import darwin/objc/runtime
+
 import ../foundation/events
 import ../foundation/mainthreadwork
+import ../foundation/terminaltrace
 import ../foundation/notifications
 import ../controls/menus
 import ../controls/fontpickers
@@ -916,8 +921,29 @@ proc clearAppearance*(app: Application) =
   app.propagateAppearance()
   app.postApplicationAppearanceNotification()
 
+proc windowsMenuIsCurrent(app: Application): bool =
+  var index = 0
+  for window in app.xWindows:
+    if not window.isNil and not window.isClosed:
+      if index >= app.xDynamicWindowsMenuItems.len:
+        return false
+      let
+        item = app.xDynamicWindowsMenuItems[index]
+        state = if window == app.xMainWindow: bsOn else: bsOff
+      if item notin app.xWindowsMenu.items() or
+          item.representedObject() != DynamicAgent(window) or
+          item.title() != window.title() or item.state() != state:
+        return false
+      inc index
+  index == app.xDynamicWindowsMenuItems.len
+
 proc updateWindowsMenu*(app: Application) =
   if app.xWindowsMenu.isNil:
+    return
+  # Shortcut dispatch checks this menu even when no window state has changed.
+  # Each removal/addition synchronizes the native menu bar, so preserve the
+  # existing items until their windows, titles or selection actually differ.
+  if app.windowsMenuIsCurrent():
     return
   let menu = app.xWindowsMenu
   for item in app.xDynamicWindowsMenuItems:
@@ -1295,6 +1321,15 @@ proc windowBlockedByModal*(app: Application, window: Window): bool =
     window == session.parentWindow
 
 proc runApplicationFrame(app: Application): int =
+  recordTerminalTrace("application-frame-start")
+  defer:
+    recordTerminalTrace("application-frame-end")
+  when defined(macosx):
+    # Native event polling has its own pool, but queued work, animations and
+    # window updates below also create autoreleased Cocoa objects.
+    let pool = NSAutoreleasePool.alloc().init()
+    defer:
+      pool.drain()
   if hasLocalSigilThread():
     discard getCurrentSigilThread().pollAll(NonBlocking)
   discard drainMainThreadWork()
@@ -1335,6 +1370,9 @@ proc prepareApplicationEventLoop(app: Application) =
     startLocalThreadDefault()
 
 proc pollApplicationEvents(app: Application) =
+  recordTerminalTrace("native-poll-start")
+  defer:
+    recordTerminalTrace("native-poll-end")
   # Native damage schedules onRender; event activity alone does not dirty views.
   for window in app.xWindows:
     if not window.isNil and window.isVisible and window.nativeReady:
@@ -1344,6 +1382,9 @@ proc pollApplicationEvents(app: Application) =
 proc waitForApplicationEvents(app: Application) =
   if hasPendingMainThreadWork():
     return
+  recordTerminalTrace("native-wait-start")
+  defer:
+    recordTerminalTrace("native-wait-end")
   if hasLocalSigilThread():
     nimkitBackend.installNativeEventLoopWaker(getCurrentSigilThread())
   let

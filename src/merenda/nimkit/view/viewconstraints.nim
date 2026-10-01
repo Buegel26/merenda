@@ -82,7 +82,8 @@ const
 proc initLayoutTerm(
     item: View, attribute: LayoutAttribute, multiplier = 1.0'f32
 ): LayoutTerm =
-  LayoutTerm(item: item, attribute: attribute, multiplier: multiplier)
+  result = LayoutTerm(attribute: attribute, multiplier: multiplier)
+  result.item = item
 
 proc initLayoutEquation(
     terms: openArray[LayoutTerm],
@@ -114,6 +115,14 @@ proc generatedLayoutInputs*(view: View): seq[LayoutInput] =
   for source in LayoutInputSource:
     for input in view.xLayoutInputCache.generated[source]:
       result.add input
+
+proc releaseGeneratedLayoutInputs*(view: View) =
+  ## Drops cached equations and resets their generations throughout a tree.
+  if view.isNil:
+    return
+  view.xLayoutInputCache = LayoutInputCache()
+  for child in view.xSubviews:
+    child.releaseGeneratedLayoutInputs()
 
 proc addToSummary(
     summaries: var seq[LayoutInputSummary],
@@ -347,15 +356,15 @@ proc newLayoutConstraint*(
     priority = LayoutPriorityRequired,
 ): LayoutConstraint =
   result = LayoutConstraint(
-    xFirstItem: firstItem,
     xFirstAttribute: firstAttribute,
     xRelation: relation,
-    xSecondItem: secondItem,
     xSecondAttribute: if secondItem.isNil: atNotAnAttribute else: secondAttribute,
     xMultiplier: multiplier,
     xConstant: constant,
     xPriority: priority,
   )
+  result.xFirstItemRef.target = firstItem
+  result.xSecondItemRef.target = secondItem
 
 func resolvedAnchorConstant(firstOffset, secondOffset, constant: float32): float32 =
   secondOffset + constant - firstOffset
@@ -797,6 +806,18 @@ proc pinEdges*(
   )
   activate(result)
 
+proc xFirstItem*(constraint: LayoutConstraint): View =
+  constraint.xFirstItemRef.target
+
+proc xSecondItem*(constraint: LayoutConstraint): View =
+  constraint.xSecondItemRef.target
+
+proc xOwningView*(constraint: LayoutConstraint): View =
+  constraint.xOwningViewRef.target
+
+proc `xOwningView=`(constraint: LayoutConstraint, view: View) =
+  constraint.xOwningViewRef.target = view
+
 proc firstItem*(constraint: LayoutConstraint): View =
   constraint.xFirstItem
 
@@ -822,7 +843,7 @@ proc priority*(constraint: LayoutConstraint): LayoutPriority =
   constraint.xPriority
 
 proc isActive*(constraint: LayoutConstraint): bool =
-  constraint.xActive
+  constraint.xActive and not constraint.xOwningViewRef.isNil
 
 proc active*(constraint: LayoutConstraint): bool =
   constraint.isActive()
@@ -831,7 +852,7 @@ proc owningView*(constraint: LayoutConstraint): View =
   constraint.xOwningView
 
 proc invalidateActiveConstraint(constraint: LayoutConstraint) =
-  if not constraint.xActive:
+  if not constraint.isActive:
     return
   constraint.xOwningView.markConstraintStorageChanged()
 
@@ -930,7 +951,7 @@ proc activationOwner(constraint: LayoutConstraint): View =
   if common.isNil: constraint.xFirstItem else: common
 
 proc `active=`*(constraint: LayoutConstraint, active: bool) =
-  if constraint.xActive == active:
+  if constraint.isActive == active:
     return
   if active:
     let owner = constraint.activationOwner()

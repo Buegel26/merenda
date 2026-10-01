@@ -1,6 +1,6 @@
 # Merenda Work Plan
 
-Updated **2026-09-25**. Focus on reliable long-running Kosmo sessions and bounded
+Updated **2026-09-29**. Focus on reliable long-running Kosmo sessions and bounded
 memory use, then extend Tekton's authoring workflow.
 
 Architecture and API decisions live in [design](docs/design.md) and
@@ -20,10 +20,17 @@ and verify extended use.
 - [ ] Run extended sessions with multiple windows, terminals, Git activity, and
   Markdown. Track children, descriptors, owned workers, and memory after warmup;
   investigate growth and turn reproducible failures into bounded regressions.
+- [ ] Reproduce the reported Kosmo 0.24.0 `Too many open files` crash with a mix
+  of editor files, Git diffs, and Markdown open. No stack trace was available;
+  the preceding layout warning does not establish the source of the exhausted
+  descriptors. The current branch passes eight repeated mixed-document lifetimes
+  with three Git refreshes per cycle and bounded descriptors/children in
+  `tests/integrations/resourcelifetimes.nim`. Terminal-watch, workspace-watch,
+  and Git-process cleanup code is unchanged from 0.24.0. Capture descriptor
+  types/counts and the failing allocation in an extended session; this report
+  remains unresolved.
 - [ ] Verify dmon's Linux recursion fix before removing Kosmo's forced polling
   fallback. Exercise deep trees, multiple windows, missed events, and shutdown.
-- [ ] Replace the temporary FigDraw `fix/acyclic-render-ownership` dependency with
-  a release containing [PR #96](https://github.com/elcritch/figdraw/pull/96).
 
 **Completion evidence:** supported close paths preserve window lifetime through
 render cleanup, and repeated sessions return owned resources to their warmed
@@ -31,8 +38,9 @@ baseline. Native Windows/Linux behavior needs validation beyond macOS results.
 
 ## 2. Memory and responsiveness — next
 
-Downloads are bounded and incremental render updates are compact. The next step
-is to measure retained memory across the whole workspace and budget its caches.
+Downloads are bounded, incremental render updates are compact, and streamed
+Markdown color updates now change local runs. The next step is to measure retained
+memory across the whole workspace and budget its caches.
 
 - [ ] Profile representative workspaces using `tests/benchmark_memory.nim` and
   longer sessions. Separate live allocations and cache contents from allocator
@@ -44,29 +52,82 @@ is to measure retained memory across the whole workspace and budget its caches.
   retained rendering together. Use the fragment/snapshot benchmarks to identify
   remaining costs. Add general visible-range text layout only if profiling
   shows it is needed.
+- [ ] Revisit suffix copying when streamed edits change Moe segment counts.
+  Merenda's adapter currently shifts the remainder of Moe's flat segment array
+  for each replacement; the isolated diagnostic took about 131/496 ms for
+  32k/64k rows when replacing seven segments per row with one. A chunked or
+  indexed segment representation would require reviewing Moe's consumers.
+  **Do not modify Moe or open a Moe PR for this work.** Record required Moe
+  changes here for a later decision. The URI batch optimization is implemented
+  entirely in Merenda's adapter.
 
 **Completion evidence:** cache growth is bounded under the chosen workload, with
 before/after memory and latency measurements and coverage for eviction/recovery.
 
-## 3. Tekton authoring — next feature work
+## 3. Tekton authoring — remaining work
 
-View editing and preview reconciliation are established. Extend that workflow
-through typed document operations while preserving invalid drafts, undo/redo,
-selection, and compatible preview identities.
+View, guide, constraint, and flat resource editing now share undo, validation, and
+save/reload workflows. Property edits reuse the preview graph; guide outlines,
+constraint endpoint highlights, and unsatisfied-constraint diagnostics are available.
+See [the review and measurements](docs/tekton-review.md).
 
-- [ ] Start non-view editing with constraints and guides: typed insert, remove,
-  move, and replace operations, including grouped transactions and validation.
-- [ ] Add structured inspectors for those resources and the property metadata
-  they need, using runtime descriptors for enum choices.
-- [ ] Connect inspectors to direct layout authoring: guide overlays, anchor
-  handles, and constraint constant, priority, and activation editing. Surface
-  conflicts and ambiguity in the same workflow.
+- [ ] Add tree operations and editable inspectors for controllers and menus, and
+  collection editors for localization strings, key bindings, and theme rules.
+- [ ] Add visual reparenting, anchor handles, multi-selection, alignment, and snapping.
+- [ ] Add inspection and change tracking for an attached running application's
+  resource graph, including custom view and controller types.
+- [ ] Add ambiguity diagnostics and runtime conflict attribution to generated layout
+  inputs; current diagnostics report authored constraints that remain unsatisfied.
+- [ ] Extend the palette to the remaining container/model-backed controls with
+  explicit serialization contracts, and add application command/outlet wiring.
 
-**Completion evidence:** a user can create, edit, undo, save, and reload a
-constrained layout, including recovery from invalid input, without losing the
-last valid preview or selection.
+**Completion evidence:** users can author a multi-window interface, wire its
+controllers and actions, and inspect the running application without losing history
+or live object identities.
 
 ## Validation
+
+### NimKit test audit: unresolved validation
+
+- [ ] Investigate native window ordering on the local macOS desktop. The
+  streaming-memory follow-up's full run and isolated integration retry failed
+  `nativeDocumentOrder(windows) == before` and `waitForNativeFront` in
+  `tests/integrations/nativewindowactivation.nim`. The same activation tests
+  also failed on Merenda commit `52a84ee9` with the same dependency checkouts.
+  That commit's GitHub Actions run `36279008824` passed. A 2026-09-29 full run
+  again failed `waitForNativeFront` at line 147 while the other three shared
+  runners passed. Reproduce desktop activation and modal/context-menu ordering
+  before changing window code or weakening the assertions; the local failure is
+  not explained yet.
+- [ ] Audit macOS standard-menu application lifetime. A freshly created
+  `Application` remains alive under ARC even without windows: it owns its
+  default menu, whose items target the application, and the native-menu
+  dispatch closure also captures it. Decide the intended owner and teardown
+  boundary before changing menu target retention; menu-created action targets
+  may need to remain owned. Cover both native and in-window menu dispatch.
+- [ ] Review eventual Chronos dispatcher teardown in Sigils. Main now retains
+  the shared animation worker between clock users, avoiding the per-restart
+  descriptor growth seen in PR #118's older Linux CI run 36078254071. Preserve
+  that fix and the enabled `repeated Chronos clock starts reuse dispatcher
+  descriptors` regression in `tests/nimkit/animations.nim`. Before replacing
+  process-lifetime reuse with full teardown, review thread-local dispatcher
+  ownership, pending timers/signals, channel and lock cleanup, and reclamation
+  of the shared thread allocation. Validate repeated starts, shared users
+  stopping in either order, active timers, and immediate shutdown on Linux and
+  macOS under ARC/ORC. This is follow-up lifecycle work, not a claim that the
+  old restart leak still reproduces on the rebased branch.
+- [ ] Investigate intermittent Kosmo Git-diff completion during full-suite
+  validation. On macOS with Nim 2.2.12, `summary and expanded files share wheel
+  scrolling` failed at its initial `panel.waitForDiff()` both in the full run
+  and a standalone retry, then passed nine focused runs and a complete Kosmo
+  run after rebuilding without a behavior change. Keep the regression and its
+  deadline intact.
+  Reproduce with `atlas-run tests kosmo`, or filter the compiled shared runner
+  with `Kosmo Git diff::summary and expanded files share wheel scrolling`.
+  Capture pending repository, patch/highlight, Markdown, and background-layout
+  work at the timeout to establish whether a completion is lost or relayout
+  does not converge. No root cause or large rewrite has been established;
+  review that evidence before changing worker/layout ownership.
 
 For each code increment, run the relevant shared runner and `atlas-run tests`.
 Compile examples with `atlas-run tests --compile-only examples/all_compile.nim`.

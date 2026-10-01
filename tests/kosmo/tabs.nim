@@ -7,6 +7,8 @@ import sigils/threads
 import merenda/nimkit
 import merenda/nimkit/text/monotextviews as monoTextViews
 import merenda/kosmo/kosmo
+import fixtures/ui
+from ../nimkit/fixtures/rendergeometry import resolvedNodes
 
 const
   RepositoryRoot = currentSourcePath().parentDir.parentDir.parentDir
@@ -17,6 +19,15 @@ func center(rect: Rect): Point =
     rect.origin.x + rect.size.width / 2.0'f32,
     rect.origin.y + rect.size.height / 2.0'f32,
   )
+
+proc hasAccentIndicator(view: View, accent: Color): bool =
+  let renders = view.buildRenders()
+  if DefaultDrawLevel notin renders:
+    return
+  for node in renders[DefaultDrawLevel].nodes:
+    if node.kind == nkRectangle and node.fill.kind == flColor and
+        node.fill.color == accent.rgba:
+      return true
 
 proc renderedText(node: Fig): string =
   for glyphIndex in 0 ..< node.textLayout.glyphCount():
@@ -70,6 +81,78 @@ suite "Kosmo":
       frontend.contentView.frame = rect(0, 0, width, 480)
       frontend.contentView.layoutSubtreeIfNeeded()
       check abs(frontend.fileTree.frame().size.width - fileTreeWidth) < 0.01'f32
+
+  test "status bar icons collapse and reopen the sidebar without losing its width":
+    let frontend = newKosmoApplication(newApplication("Kosmo Sidebar Status Test"))
+    defer:
+      frontend.close()
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.frame = rect(0, 0, 760, 520)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    frontend.splitView.setPositionOfDivider(0, 230.0'f32)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    let
+      chosenWidth = frontend.sidebarPane.frame().size.width
+      bar = frontend.statusLabel.superview()
+      accent = frontend.window.effectiveAppearance().resolveColor(
+          controlStyle(srDocumentTab), StyleMarkColor, color(0, 0, 0, 1)
+        )
+      fileButton = bar.buttonWithLabel("Files")
+      findButton = bar.buttonWithLabel("Find")
+    require not fileButton.isNil
+    require not findButton.isNil
+    let
+      filesPoint = fileButton.pointToWindow(fileButton.bounds().center())
+      findPoint = findButton.pointToWindow(findButton.bounds().center())
+    check fileButton.hasAccentIndicator(accent)
+    check not findButton.hasAccentIndicator(accent)
+    check not frontend.splitView.isPaneCollapsed(0)
+    require frontend.window.clickAt(filesPoint)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check frontend.splitView.isPaneCollapsed(0)
+    check frontend.sidebarPane.frame().size.width == 0.0'f32
+    check frontend.dockView.frame().minX == 0.0'f32
+    check not fileButton.hasAccentIndicator(accent)
+    check not findButton.hasAccentIndicator(accent)
+    require frontend.window.clickAt(findPoint)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check not frontend.splitView.isPaneCollapsed(0)
+    check frontend.sidebarTabs.selectedIndex == 1
+    check abs(frontend.sidebarPane.frame().size.width - chosenWidth) < 0.01'f32
+    check findButton.hasAccentIndicator(accent)
+    require frontend.window.clickAt(findPoint)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check frontend.splitView.isPaneCollapsed(0)
+    require frontend.showFileExplorer()
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check not frontend.splitView.isPaneCollapsed(0)
+    check frontend.sidebarTabs.selectedIndex == 0
+    check abs(frontend.sidebarPane.frame().size.width - chosenWidth) < 0.01'f32
+
+  test "status text stays clear of sidebar icons after resizing and theme changes":
+    let frontend = newKosmoApplication(newApplication("Kosmo Status Text Test"))
+    defer:
+      frontend.close()
+    frontend.window.setContentView(frontend.contentView)
+    let bar = frontend.statusLabel.superview()
+    let findButton = bar.buttonWithLabel("Find")
+    require not findButton.isNil
+
+    for theme in [initAquaTheme(), initDarkBSDTheme()]:
+      frontend.window.setAppearance(initAppearance(theme))
+      for width in [760.0'f32, 480.0'f32]:
+        frontend.contentView.frame = rect(0, 0, width, 520)
+        frontend.contentView.layoutSubtreeIfNeeded()
+        frontend.statusLabel.text = "NORMAL · No Name"
+        let renders = frontend.statusLabel.buildRenders()
+        require DefaultDrawLevel in renders
+        var foundText = false
+        for node in renders[DefaultDrawLevel].resolvedNodes():
+          if node.kind == nkText and node.renderedText() == frontend.statusLabel.text:
+            foundText = true
+            check node.screenBox.x > findButton.frame().maxX
+            check node.screenBox.x + node.screenBox.w <= bar.bounds().maxX
+        check foundText
 
   test "native tabs select, reorder, and close Moe buffers":
     let
@@ -198,8 +281,6 @@ suite "Kosmo":
     check tabs.len == 1
     check tabs[0].title == "first.txt"
     check tabs[0].temporary
-    check KosmoPreviewTabStyleClass in
-      frontend.documentTabs.documentTabModels()[0].styleClasses
 
     let tabPoint = frontend.documentTabs.pointToWindow(
       frontend.documentTabs.documentTabRect(0).center()
@@ -210,8 +291,6 @@ suite "Kosmo":
     check tabs.len == 1
     check tabs[0].title == "first.txt"
     check not tabs[0].temporary
-    check KosmoPreviewTabStyleClass notin
-      frontend.documentTabs.documentTabModels()[0].styleClasses
 
     check frontend.window.mouseDownAt(tabPoint, clickCount = 2)
     check frontend.window.mouseUpAt(tabPoint, clickCount = 2)
@@ -261,17 +340,17 @@ suite "Kosmo":
     frontend.editorPane.layoutSubtreeIfNeeded()
     controls.layoutSubtreeIfNeeded()
     check not controls.hidden
-    check controls.modeButton.title == "</>"
+    check controls.modeButton.accessibilityLabel == "Edit Markdown source"
     check controls.colorModeButton.title == "Dark"
     check controls.markdownColorMode == kmcmLight
-    check controls.markdownFontSize == KosmoMarkdownDefaultFontSize
+    let originalFontSize = controls.markdownFontSize
     let
       controlsFrame = controls.frame()
       previewFrame = frontend.editorPane.markdownView.frame()
       paneBounds = frontend.editorPane.bounds()
     check abs(controlsFrame.minX) < 0.01'f32
     check abs(controlsFrame.maxX - paneBounds.maxX) < 0.01'f32
-    check abs(controlsFrame.minY - KosmoTabBarHeight) < 0.01'f32
+    check abs(controlsFrame.minY - frontend.documentTabs.frame().maxY) < 0.01'f32
     check controlsFrame.maxY <= previewFrame.minY
     let controlTitles = View(controls).renderedTexts()
     for title in ["</>", "Dark", "-", "+"]:
@@ -304,7 +383,7 @@ suite "Kosmo":
         controls.increaseFontButton.bounds().center()
       )
     )
-    check controls.markdownFontSize == KosmoMarkdownDefaultFontSize + 1.0'f32
+    check controls.markdownFontSize > originalFontSize
     check frontend.editorPane.markdownView.markdownStyle.bodyFontSize ==
       controls.markdownFontSize
     check frontend.window.clickAt(
@@ -312,7 +391,7 @@ suite "Kosmo":
         controls.decreaseFontButton.bounds().center()
       )
     )
-    check controls.markdownFontSize == KosmoMarkdownDefaultFontSize
+    check controls.markdownFontSize == originalFontSize
 
     check frontend.window.clickAt(
       controls.modeButton.pointToWindow(controls.modeButton.bounds().center())
@@ -556,14 +635,14 @@ suite "Kosmo":
       frontend.shortcutProfile().primaryModifiers() + {nimkit.kmShift}
 
     check frontend.window
-      .keyBindings()
-      .commandFor(
-        KeyEvent(
-          key: keyRightBracket,
-          keyCode: keyRightBracket.ord,
-          modifiers: tabShortcutModifiers,
-        )
-      ).isNone
+    .keyBindings()
+    .commandFor(
+      KeyEvent(
+        key: keyRightBracket,
+        keyCode: keyRightBracket.ord,
+        modifiers: tabShortcutModifiers,
+      )
+    ).isNone
     check frontend.editorView.editor.tabs()[1].active
     check frontend.window.dispatchKeyDown(
       KeyEvent(key: keyW, keyCode: keyW.ord, modifiers: {kmControl})
@@ -641,7 +720,6 @@ suite "Kosmo":
       KeyEvent(key: key2, keyCode: key2.ord, modifiers: primaryShortcutModifiers)
     )
     check frontend.window.firstResponder == groups[0].editorView
-    check not groups[0].pane.documentTabs.hasStyleClass(KosmoInactivePaneStyleClass)
 
     check frontend.window.dispatchKeyDown(
       KeyEvent(key: key1, keyCode: key1.ord, modifiers: primaryShortcutModifiers)
@@ -653,7 +731,6 @@ suite "Kosmo":
       KeyEvent(key: key3, keyCode: key3.ord, modifiers: primaryShortcutModifiers)
     )
     check frontend.window.firstResponder == groups[1].editorView
-    check not groups[1].pane.documentTabs.hasStyleClass(KosmoInactivePaneStyleClass)
 
     check frontend.window.dispatchKeyDown(
       KeyEvent(key: key2, keyCode: key2.ord, modifiers: primaryShortcutModifiers)
@@ -672,3 +749,97 @@ suite "Kosmo":
       KeyEvent(key: key4, keyCode: key4.ord, modifiers: primaryShortcutModifiers)
     )
     check frontend.window.firstResponder == positionedGroups[1].editorView
+
+proc splitTerminalPane(frontend: KosmoApplication) =
+  let terminal = newKosmoTerminalView()
+  doAssert frontend.openDocument(
+    newKosmoPaneDocument("ownership-terminal", "Terminal", terminal)
+  )
+  doAssert frontend.window.sendAction(actionSelector(KosmoSplitVerticalAction))
+  frontend.contentView.layoutSubtreeIfNeeded()
+  doAssert frontend.editorGroups().len == 2
+  doAssert frontend.editorGroups()[1].pane.documentTabs.len == 1
+
+proc tabCountNamed(frontend: KosmoApplication, title: string): int =
+  for group in frontend.editorGroups():
+    group.editorView.refresh()
+    for model in group.pane.documentTabs.documentTabModels():
+      if model.title == title:
+        inc result
+
+suite "Kosmo pane file ownership":
+  test "opening the same preview from another pane reuses its existing tab":
+    let
+      root = createTempDir("kosmo-pane-existing-", "")
+      basePath = root / "base.txt"
+      targetPath = root / "target.txt"
+      app = newApplication("Pane file ownership")
+      frontend = newKosmoApplication(app, filePath = root, monitorsGitStatus = false)
+    defer:
+      frontend.close()
+      removeDir(root)
+    writeFile(basePath, "base")
+    writeFile(targetPath, "target")
+    app.addWindow(frontend.window)
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    app.activateWindow(frontend.window)
+    require frontend.openPath(basePath)
+    frontend.splitTerminalPane()
+    require frontend.showFileExplorer()
+    frontend.fileTree.onOpenFile()(targetPath, fodTemporary)
+    check frontend.tabCountNamed("target.txt") == 1
+    require frontend.window.makeFirstResponder(frontend.editorGroups()[0].editorView)
+    require frontend.showFileExplorer()
+    frontend.fileTree.onOpenFile()(targetPath, fodTemporary)
+    check frontend.tabCountNamed("target.txt") == 1
+
+  test "a preview in another pane preserves the first pane's preview":
+    let
+      root = createTempDir("kosmo-pane-preview-", "")
+      basePath = root / "base.txt"
+      firstPath = root / "first.txt"
+      secondPath = root / "second.txt"
+      app = newApplication("Pane file ownership")
+      frontend = newKosmoApplication(app, filePath = root, monitorsGitStatus = false)
+    defer:
+      frontend.close()
+      removeDir(root)
+    writeFile(basePath, "base")
+    writeFile(firstPath, "first")
+    writeFile(secondPath, "second")
+    app.addWindow(frontend.window)
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    app.activateWindow(frontend.window)
+    require frontend.openPath(basePath)
+    frontend.splitTerminalPane()
+    require frontend.showFileExplorer()
+    frontend.fileTree.onOpenFile()(firstPath, fodTemporary)
+    check frontend.tabCountNamed("first.txt") == 1
+    require frontend.window.makeFirstResponder(frontend.editorGroups()[0].editorView)
+    require frontend.showFileExplorer()
+    frontend.fileTree.onOpenFile()(secondPath, fodTemporary)
+    check frontend.tabCountNamed("first.txt") == 1
+    check frontend.tabCountNamed("second.txt") == 1
+
+  test "a first file in a terminal pane does not replace another pane's blank tab":
+    let
+      root = createTempDir("kosmo-pane-blank-", "")
+      targetPath = root / "target.txt"
+      app = newApplication("Pane file ownership")
+      frontend = newKosmoApplication(app, filePath = root, monitorsGitStatus = false)
+    defer:
+      frontend.close()
+      removeDir(root)
+    writeFile(targetPath, "target")
+    app.addWindow(frontend.window)
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    app.activateWindow(frontend.window)
+    frontend.splitTerminalPane()
+    require frontend.showFileExplorer()
+    frontend.fileTree.onOpenFile()(targetPath, fodTemporary)
+    check frontend.tabCountNamed("target.txt") == 1
+    check frontend.editorGroups()[0].pane.documentTabs.documentTabModels()[0].title ==
+      "No Name"

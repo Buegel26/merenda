@@ -19,6 +19,7 @@ import ../drawing/images
 import ../drawing/rendering as nimkitRendering
 import ../drawing/renderscenes
 import ../foundation/events
+import ../foundation/terminaltrace
 import ../foundation/notifications
 import ../text/fieldeditors
 from ../text/textviews import
@@ -97,6 +98,7 @@ type
     allowedFileTypes*: seq[string]
     accessoryView*: View
     contentView*: View
+    browserView*: View
     nameField*: View
     buttonViews*: seq[View]
     response*: int
@@ -752,14 +754,14 @@ proc newAlert*(
 
 proc newOpenPanel*(): OpenPanel =
   result = OpenPanel(
-    window: newPanel("Open", rect(100, 100, 640, 460)),
+    window: newPanel("Open", rect(100, 100, 760, 540)),
     prompt: "Open",
     canChooseFiles: true,
   )
   initResponder(result)
 
 proc newSavePanel*(): SavePanel =
-  result = SavePanel(window: newPanel("Save", rect(100, 100, 520, 280)), prompt: "Save")
+  result = SavePanel(window: newPanel("Save", rect(100, 100, 760, 580)), prompt: "Save")
   initResponder(result)
 
 proc popupPixels(value: float32, scale: float32, minimum: int32): int32 {.inline.} =
@@ -2068,6 +2070,11 @@ proc close*(window: Window) =
   window.sendWindowDelegate(windowWillClose(), window)
   emit window.willClose()
   window.postWindowNotification(nkWindowWillClose)
+  if window.xFirstResponder of FieldEditor and not window.makeFirstResponder(nil):
+    # A validation veto must not leave the closing window's editor attached.
+    discard FieldEditor(window.xFirstResponder).cancelEditing()
+    window.xFirstResponder = nil
+  window.xContentView.releaseGeneratedLayoutInputs()
   let notifyPopupDone =
     window.xIsPopup and not window.xClosed and not window.xOnPopupDone.isNil
   window.stopInsertionPointBlink()
@@ -2520,6 +2527,10 @@ proc syncNativeGeometry(window: Window): Size =
 proc renderNativeWindow*(window: Window) =
   if not window.nativeReady:
     return
+
+  recordTerminalTrace("frame-start", cast[uint64](window))
+  defer:
+    recordTerminalTrace("frame-end", cast[uint64](window))
 
   window.xHostWindow.refreshContentScale()
   let logicalSize = window.syncNativeGeometry()

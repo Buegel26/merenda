@@ -34,6 +34,7 @@ import ../drawing/renderresources
 import ../drawing/renderscenes
 import ../foundation/types
 import ../foundation/events
+import ../foundation/terminaltrace
 import ./pasteboards
 import ./workspaces
 import ./windoweffects
@@ -467,6 +468,7 @@ proc submitRenderScene*(
     renderId = host.nextRenderId
     sceneIdentity = scene.sceneIdentity()
     sceneGeneration = scene.frameGeneration()
+  recordTerminalTrace("submit-start", host.id, renderId)
   var update = scene.newRenderSceneUpdate(
     host.acknowledgedSceneIdentity, host.acknowledgedSceneGeneration,
     host.forceFullSceneUpdate,
@@ -491,6 +493,7 @@ proc submitRenderScene*(
   )
   host.rendererWakeups.wakeRenderer()
   host.renderRequested = true
+  recordTerminalTrace("submit-end", host.id, renderId)
   true
 
 proc acknowledgeRender*(host: ThreadHostClient, renderId: uint64) =
@@ -1493,17 +1496,24 @@ proc render*(host: HostWindow, renders: var Renders, logicalSize: Size) =
 proc render*(host: HostWindow, scene: RenderScene, logicalSize: Size) =
   if not host.isReady or host.xRenderer.isNil or not host.xNativeWindow.opened():
     return
+  recordTerminalTrace("render-start", cast[uint64](host), host.xRenderCount.uint64 + 1)
   host.xRenderRequested = false
   host.refreshContentScale()
   host.xResources.prepare(host.xRenderer, scene.renderResources())
   let size = vec2(logicalSize.width, logicalSize.height)
+  recordTerminalTrace(
+    "render-prepared", cast[uint64](host), host.xRenderCount.uint64 + 1
+  )
   host.xRenderer.beginFrame()
+  recordTerminalTrace("render-begun", cast[uint64](host), host.xRenderCount.uint64 + 1)
   if host.xTransparent:
     scene.renderFrame(host.xRenderer, size, clearFrameColor = clearColor)
   else:
     scene.renderFrame(host.xRenderer, size)
+  recordTerminalTrace("render-drawn", cast[uint64](host), host.xRenderCount.uint64 + 1)
   host.xRenderer.endFrame()
   inc host.xRenderCount
+  recordTerminalTrace("present", cast[uint64](host), host.xRenderCount.uint64)
 
 proc dedicatedRendererSupported*(): bool =
   # Renderer commands retire source-thread ORC registrations before transfer.
@@ -1786,7 +1796,13 @@ proc createHostWindow*(
   result.installNativeClipboardBridge()
   result.installEventHandlers()
 
-  result.xNativeWindow.firstStep()
+  when defined(macosx):
+    # Cocoa's visible first step raises existing windows in creation order.
+    # Realize only this window, just as we do for context-menu popups.
+    result.xNativeWindow.firstStep(makeVisible = false)
+    result.xNativeWindow.visible = true
+  else:
+    result.xNativeWindow.firstStep()
   result.xNativeWindow.refreshUiScale(result.xAutoScale)
   result.xReady = true
 
@@ -1964,12 +1980,15 @@ proc renderLatest(state: ThreadRendererHost) =
     return
   if state.lastScene.isNil and state.lastRenders.isNil:
     return
+  recordTerminalTrace("render-start", state.id, state.lastRenderId)
   if state.lastScene.isNil:
     state.resources.prepare(state.renderer)
   else:
     state.resources.prepare(state.renderer, state.lastFragmentResources)
   let size = vec2(state.logicalSize.width, state.logicalSize.height)
+  recordTerminalTrace("render-prepared", state.id, state.lastRenderId)
   state.renderer.beginFrame()
+  recordTerminalTrace("render-begun", state.id, state.lastRenderId)
   if not state.lastScene.isNil:
     if state.transparent:
       state.lastScene.renderFrame(state.renderer, size, clearFrameColor = clearColor)
@@ -1979,7 +1998,9 @@ proc renderLatest(state: ThreadRendererHost) =
     state.renderer.renderFrame(state.lastRenders, size, clearColor = clearColor)
   else:
     state.renderer.renderFrame(state.lastRenders, size)
+  recordTerminalTrace("render-drawn", state.id, state.lastRenderId)
   state.renderer.endFrame()
+  recordTerminalTrace("present", state.id, state.lastRenderId)
   inc state.renderCount
   state.postEvent(
     ThreadHostEvent(

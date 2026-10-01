@@ -5,6 +5,7 @@ import sigils/core
 import sigils/selectors
 
 import merenda/nimkit
+import ./fixtures/rendergeometry
 
 type TextChangeSpy = ref object of Agent
   changeCount: int
@@ -23,25 +24,85 @@ proc rememberActionDidSend(spy: ControlActionSpy, sender: DynamicAgent) {.slot.}
   spy.lastSender = sender
 
 suite "nimkit controls":
+  test "toggle buttons render their cell state after keyboard focus moves away":
+    let
+      window = newWindow("Toggle rendering", frame = rect(0, 0, 240, 100))
+      root = newView(frame = rect(0, 0, 240, 100))
+      button = newButton(".*", frame = rect(10, 10, 28, 28))
+      field = newTextField(frame = rect(60, 10, 140, 28))
+      offColor = color(0.1, 0.2, 0.3, 1)
+      onColor = color(0.7, 0.1, 0.2, 1)
+    defer:
+      window.close()
+    var appearance = initAppearance()
+    appearance[srButton, StyleChrome] = styleKeyword(DefaultChromeName)
+    appearance[srButton, StyleFill] = fill(offColor)
+    appearance.setStyle(
+      initStyleSelector(srButton, {ssSelected}), StyleFill, fill(onColor)
+    )
+    button.buttonType = btToggle
+    root.appearance = appearance
+    root.addSubview(button)
+    root.addSubview(field)
+    window.setContentView(root)
+    for state in [bsOff, bsOn, bsOff]:
+      if button.state != state:
+        require window.clickAt(button.pointToWindow(initPoint(14, 14)))
+      require window.makeFirstResponder(field)
+      check button.state == state
+      var foundFace = false
+      let expected = if state == bsOn: onColor else: offColor
+      for node in window.buildRenders()[DefaultDrawLevel].resolvedNodes():
+        if node.kind == nkRectangle and node.fill == fill(expected):
+          foundFace = true
+      check foundFace
+
+  test "button vector icons render independently of the title font and copy with cells":
+    let button = newButton("Expand", frame = rect(0, 0, 28, 28))
+    button.addStyleClass(ToolbarButtonStyleClass)
+    button.icon = newSvgMtsdfResource(
+      """<svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 6 L8 11 L13 6 L11 4 L8 7 L5 4 Z"/></svg>"""
+    )
+    check button.accessibilityLabel() == "Expand"
+    check button.buttonCell().copyButtonCell().icon.len == button.icon.len
+    var iconCount = 0
+    for node in buildRenders(button)[DefaultDrawLevel].resolvedNodes():
+      if node.kind == nkMtsdfImage:
+        inc iconCount
+        check node.screenBox.w > 0
+        check node.screenBox.h > 0
+        check node.screenBox.x >= 0
+        check node.screenBox.y >= 0
+        check node.screenBox.x + node.screenBox.w <= 28
+        check node.screenBox.y + node.screenBox.h <= 28
+      check node.kind != nkText
+    check iconCount > 0
+
   test "switch and slider focus rings follow the active theme":
     let
       root = newView(frame = rect(0, 0, 240, 100))
       switchButton = newSwitchButton(true, frame = rect(16, 16, 54, 30))
-      slider = newSlider(0.0, 1.0, 0.5, frame = rect(16, 58, 180, 26))
-      focusColor = color(0.70, 0.06, 0.24, 0.64)
+      # No active track: its border can deliberately share the focus-ring tint.
+      slider = newSlider(0.0, 1.0, 0.0, frame = rect(16, 58, 180, 26))
 
-    root.appearance = initAppearance(initDarkBSDTheme())
-    switchButton.focusVisible = true
-    slider.focusVisible = true
     root.addSubview(switchButton)
     root.addSubview(slider)
 
-    var focusRingCount = 0
-    for node in buildRenders(root)[DefaultDrawLevel].nodes:
-      if node.kind == nkRectangle and node.stroke.weight == 3.0'f32 and
-          node.stroke.fill.kind == flColor and node.stroke.fill.color == focusColor.rgba:
-        inc focusRingCount
-    check focusRingCount == 2
+    for focusColor in [color(0.7, 0.1, 0.3, 0.6), color(0.1, 0.6, 0.7, 0.8)]:
+      var appearance = initAppearance()
+      appearance[srSwitch, StyleFocusRingColor] = focusColor
+      appearance[srSlider, StyleFocusRingColor] = focusColor
+      root.appearance = appearance
+      for control in [Control(switchButton), Control(slider)]:
+        for focused in [true, false]:
+          control.focusVisible = focused
+          var ringFound = false
+          for node in buildRenders(control)[DefaultDrawLevel].nodes:
+            if node.kind == nkRectangle and node.stroke.weight > 0 and
+                node.stroke.fill.kind == flColor and
+                node.stroke.fill.color == focusColor.rgba:
+              ringFound = true
+          check ringFound == focused
 
   test "cell editing action flag is a field-backed protocol property":
     let cell = newCell()

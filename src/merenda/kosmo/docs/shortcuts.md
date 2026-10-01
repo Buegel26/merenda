@@ -52,6 +52,7 @@ uses `primary`; Settings and menus show its resolved physical spelling.
 | `primary-Q` | Quit Kosmo | |
 | `primary-Shift-[` / `primary-Shift-]` | Previous / next tab | `gT` / `gt` remain Moe tab commands. |
 | `primary-Shift-E` / `primary-Shift-F` | Show and focus Files / Find in Files | |
+| `primary-Alt-Shift-F` | Replace in Files | Expands replacement controls; `primary-Shift-F` returns to search only. |
 | `primary-P` | Quick Open | |
 | `primary-Shift-T` | New terminal tab | |
 | `primary-Shift-G` | Show Git diff tab | |
@@ -81,6 +82,12 @@ semantic editor bridge when a Kosmo editor is focused.
 The File menu is populated from the same registry, so Open, Save, Quick Open,
 New Terminal, Show Git Diff, and Close Tab show the resolved key equivalents
 rather than separate hard-coded shortcuts.
+
+Editor search uses `Shortcut-F`; `Shortcut-Alt-F` opens it with replacement
+expanded. A disclosure chevron toggles replacement without clearing either field.
+`Shortcut-F` always collapses replacement and focuses the search field, including
+when a replacement field is already focused. Markdown, Git diff, and terminal
+search remain search-only.
 
 The standard Edit menu is a responder-chain facility. Kosmo bridges its Copy,
 Cut, Paste, Select All, Undo, and Redo commands to semantic Moe operations:
@@ -147,6 +154,7 @@ kosmo.splitHorizontal
 kosmo.splitVertical
 kosmo.showFileExplorer
 kosmo.findInFiles
+kosmo.replaceInFiles
 kosmo.quickOpen
 kosmo.focusPanel1 ... kosmo.focusPanel8
 ```
@@ -296,8 +304,28 @@ Markdown previews use the same pane parser and semantic dock operations,
 including `Ctrl-W n` to create an empty-buffer split. It deliberately does not
 install a window-wide `Ctrl-W` prefix: terminals, sidebars, dialogs, and
 unrelated controls keep their own input. Moe receives unclaimed editor input,
-so this scoped bridge can later be replaced by a fully configurable Moe
-frontend pane-request API without changing Kosmo's panel semantics.
+and runtime Moe mappings for Ctrl-W take precedence over the default pane
+bridge. Moe's dispatched window results also use Kosmo's pane operations, so
+a mapping such as `:nmap C-y window-new` creates a native Kosmo pane.
+For a single-key Ctrl-W override, use a key-sequence mapping such as
+`:nnoremap C-w C-w n`. Moe currently gives its built-in Ctrl-W sequences
+precedence over a bare command mapped to Ctrl-W, such as
+`:nmap C-w window-new`; changing that precedence needs a separate upstream fix.
+
+A macro or key-sequence mapping stops when it requests a native tab or pane
+action. Remaining keys in that replay are discarded so they cannot edit the
+source buffer while Kosmo opens the destination. Enter further edits after
+the tab or pane opens.
+
+Ex commands use the same dock: `:split` (`:sp`) splits below, `:vsplit` (`:vs`)
+splits right, and either accepts a filename resolved from the editor's working
+directory. `:new` and `:vnew` create empty-buffer panes. `:q` closes the current
+document tab and removes its pane when empty; a shared buffer stays open in
+its other panes. `:q!` discards an unshared buffer's unsaved changes.
+
+`:help` opens a reusable Markdown tab. `:config` and mappings to
+`mode_switch config` open a reusable interactive Config tab, retaining its
+selection and edits across tab or pane switches without an internal Moe split.
 
 Within a focused Markdown preview, arrow keys scroll smoothly by four lines,
 while `j` and `k` retain one-line movement. `Space` scrolls smoothly by one

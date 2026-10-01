@@ -63,6 +63,21 @@ FigDraw is compiled into the application. Merenda's experimental
 `useNativeDynlib` mode and `build_dynlib` task have been removed; omit
 `-d:useNativeDynlib` from existing build commands.
 
+## Tekton interface builder
+
+Build a resource document with Tekton's widget palette, property inspector, and live
+preview. Add layout guides and constraints, pin views to their parent, undo changes,
+and save the result for your Merenda app. Use **Interact** to try controls in the preview.
+
+```sh
+nim r src/merenda/tekton.nim
+# Or open an existing interface:
+nim r src/merenda/tekton.nim path/to/interface.cbor
+```
+
+See [Tekton's authoring workflow](docs/resources.md#tekton-resource-editor) for supported
+resources and how to load the saved interface in your app.
+
 ## A few small apps
 
 ### Hello, Merenda
@@ -353,12 +368,78 @@ Run [the carousel example](examples/carousel_demo.nim) with
 and the animation's `finished` signal enables the button for the next transition.
 For more, see [property animations and sequences](examples/animation_demo.nim).
 
+### Blur an overlay's background
+
+A standard `Box` can blur the content behind its rounded bounds through FigDraw.
+Its child controls stay sharp, and its fill follows the active theme:
+
+```nim
+let overlay = newBox(frame = rect(24, 24, 320, 96))
+overlay.addStyleClass(PopoverBoxStyleClass)
+overlay.backdropBlurRadius = 20
+overlay.backdropTintOpacity = 0.78
+overlay.addContentSubview(newTextField("Search"))
+root.addSubview(overlay)
+```
+
+Set `backdropBlurRadius` to zero to restore the ordinary box fill.
+`backdropTintOpacity` controls the themed tint over the blurred content, from
+zero to one. This effect is rendered inside the application, independently of
+native window backdrop effects.
+
 ## Kosmo
 
 Kosmo is a code editor built with Merenda and Moe's Vim-style editing engine.
 It brings together a file browser, split panes, terminal tabs, Markdown previews,
 and Git diffs. You can use it on its own or explore its source to see how a
 larger Merenda app fits together.
+
+Use the Files and Find icons at the left of the status bar to switch sidebar
+views. Click the active icon again to collapse the sidebar and give the editor
+the full window width; click either icon to reopen it at its previous width.
+
+Press `Cmd-F` on macOS or `Ctrl-F` elsewhere to search an editor, Markdown
+preview, or Git diff. Use Enter / the arrow buttons to move through matches,
+`Cmd/Ctrl-G` and `Shift-Cmd/Ctrl-G` for next and previous, and Escape to close.
+Editor matches scroll to the center of the pane. Markdown and diff viewers use
+case-insensitive literal search; diff search includes collapsed sections and
+loads ordinary patches within the viewer's size limits. Open oversized patches
+explicitly to include their contents.
+
+Editor search and the Find sidebar open with replacement controls collapsed.
+Click the chevron beside the search field to expand or collapse them without
+clearing the query or results. On macOS, `Option-Cmd-F` opens editor replacement
+and `Option-Shift-Cmd-F` opens replacement in files; elsewhere use
+`Alt-Ctrl-F` and `Alt-Shift-Ctrl-F`. The regular `Cmd/Ctrl-F` editor shortcut and
+`Shift-Cmd/Ctrl-F` file-search shortcut always return to search only.
+
+Editor replacement offers **Replace** and **Replace All**, with one undo step per
+operation. In the Find sidebar, run a search, expand replacement, enter text, then
+choose **Replace** for the selected match or **Replace All**. Both fields treat
+text literally by default. Enable **`.*`** to use Reni regular expressions in the
+query and capture templates in the replacement: `$0` is the entire match, `$1`
+and later numbers are captures, `${name}` is a named capture, and `$$` inserts a
+dollar sign. For example, search `(?<name>cat|dog)` and replace with `${name}!`.
+When named groups are present, Reni treats unnamed groups as noncapturing.
+Matching is line by line, with Unicode-aware offsets; replacement text may
+contain newlines. Invalid patterns or capture references show an error, and
+invalid replacement templates leave files and buffers untouched. Empty
+replacement text deletes matches. File replacement
+saves the displayed results, including any search limits, checks that matched lines
+still agree with the results, and skips files with unsaved editor changes. Its status
+reports replacements and skipped files, then refreshes the search.
+
+Filesystem notifications keep the browser and Quick Open inventory current.
+On macOS, one FSEvents stream covers a project tree; linked folders and Git
+metadata outside that tree retain their own streams. If native monitoring
+cannot cover a path, Kosmo polls periodically and logs the cause and affected
+paths. Missing directories and exhausted watch capacity are retried automatically.
+
+Open, Open Folder, and Save As share a resizable file browser with Places shortcuts,
+Back/Forward/Up navigation, and an editable location field. Enter an absolute path,
+a relative folder, or `~/` and press Return to navigate. The file list and Name
+column expand with the dialog; Save As keeps the filename below the browser so you
+can change folders without losing the name you typed.
 
 ### Install and open a project
 
@@ -380,8 +461,10 @@ kosmo .
 kosmo README.md
 ```
 
-These commands reuse a running Kosmo instance. Add `--bg` to start Kosmo detached
-from your shell. On macOS, you can also open `Kosmo.app` from Finder.
+These commands reuse a running Kosmo instance. Use `kosmo --bg ./folder/` to
+start a new instance detached from your shell, or `kosmo --new ./folder/` to
+start a new instance in the foreground. `kosmo -v` and `kosmo --version` print
+the version and exit. On macOS, you can also open `Kosmo.app` from Finder.
 
 Add one or more folders to the existing Kosmo window with `--add`:
 
@@ -394,17 +477,60 @@ File → New Terminal to open a shell. Markdown files open as previews, with a
 control to switch to the source editor. Merenda Settings places the theme and
 UI scale in Appearance, fonts in Typography, and scrolling in Behavior.
 
+In Moe's normal mode, `:e path` opens a Kosmo document tab or selects the file's
+existing tab.
+`:help` and `:config` open reusable tabs; `:config` keeps Moe's interactive
+settings viewer and its selection when you switch tabs, and closes with `:q`.
+`:split` (`:sp`) opens the current buffer in a pane below, and `:vsplit` (`:vs`)
+opens it in a pane to the right. Add a filename to open that file in the new
+pane; relative paths use the editor's working directory. `:new` and `:vnew`
+create empty buffers in those panes. Moe mappings for these commands and
+`mode_switch config` use the same Kosmo tabs and panes.
+
 Settings changes apply to the current Kosmo instance immediately. Choose
 **Save as Default** to use the committed theme, fonts, scale, and scrolling
 choices on the next launch; **Reset** restores the last saved values. You can
 also enable **Remember changes for future launches** to save each committed
 change automatically.
 
+Terminal tabs sleep on PTY readiness while idle and batch active output into
+bounded updates. For native timing measurements with `cmatrix` or `ps`, see
+[terminal latency diagnostics](docs/terminal-latency.md).
+
 Kosmo Settings → Moe Themes includes Catppuccin Latte, Catppuccin Mocha,
 Kanagawa Wave, One Dark, and Tokyo Night Moon. These themes are embedded in
 the executable and work from any launch directory. Add your own TOML themes
 in `~/.config/moe/themes`; a user theme with the same name overrides a bundled
 theme.
+
+To use a Nim language server, add `nimLspCommand` to Kosmo's
+`~/.config/kosmo/config.json` and restart Kosmo. The command must be an
+absolute executable path followed by any arguments. For example, after building
+[Nimdex](https://github.com/elcritch/nimdex) from its checkout:
+
+```sh
+cd ../nimdex
+mkdir -p bin
+deps/nim-devel/bin/nim c -d:release -o:bin/nimdex src/nimdex.nim
+```
+
+Add this field to the JSON config, using absolute paths without spaces:
+
+```json
+{
+  "nimLspCommand": "/absolute/path/to/nimdex/bin/nimdex daemon --compiler /absolute/path/to/nimdex/deps/nim-devel/bin/nim"
+}
+```
+
+Kosmo enables Moe's LSP client when this field is set. In normal mode, press
+`g` then `d` to go to a definition, or `K` to show hover information. Remove
+the field or set it to an empty string to disable LSP on the next launch.
+Nimdex's `daemon` command communicates over standard input and output and stays
+attached to Kosmo; it does not need to detach itself.
+
+Syntax colors arrive progressively as background workers finish small batches.
+Markdown previews display their content before fenced-code coloring finishes;
+selection, code-block scroll positions, and text layout survive those color updates.
 
 To add language highlighting, open **Kosmo Settings → TextMate Grammars** and
 search the built-in language grammars in the open-source `microsoft/vscode`
@@ -436,6 +562,17 @@ nim c -o:kosmo src/merenda/kosmo/kosmo.nim
 ```
 
 On Windows, run `./kosmo.exe .` after compiling.
+
+On macOS, install the current checkout as a complete `Kosmo.app` with its icon,
+bundled notices, debug symbols, and local code signature:
+
+```sh
+nim install_kosmo
+```
+
+This uses Atlas to resolve dependencies, replaces `~/Applications/Kosmo.app`,
+and updates the `~/.local/bin/kosmo` link. Restart Kosmo if it was already
+running. Set `KOSMO_INSTALL_DIR` or `KOSMO_BIN_DIR` to choose other locations.
 
 ## Explore more
 

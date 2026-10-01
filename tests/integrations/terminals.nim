@@ -5,11 +5,12 @@ import std/[monotimes, os, sequtils, strutils, tempfiles, times, unittest]
 
 import terminex
 
-import sigils/core
+import sigils/[core, threads]
 
 import merenda/nimkit/accessibility/accessibilityprotocols
 import merenda/nimkit/app/[animations, application, pasteboards, windows]
 import merenda/nimkit/foundation/[events, selectors, types]
+import merenda/nimkit/foundation/mainthreadwork
 import merenda/nimkit/responder/responders
 import merenda/nimkit/terminal/terminalviews
 import merenda/nimkit/text/monotextviews
@@ -76,6 +77,8 @@ proc tickUntilNormalizedText(
 ): bool =
   let deadline = getMonoTime() + timeout
   while getMonoTime() < deadline:
+    discard getCurrentSigilThread().pollAll(NonBlocking)
+    discard drainMainThreadWork()
     discard window.animationScheduler().tick(initDuration(milliseconds = 16))
     let rendered = view.stringValue().replace("\n", " ").splitWhitespace().join(" ")
     if expected in rendered:
@@ -128,6 +131,8 @@ proc tickUntilCurrentLineContains(
 ): bool =
   let deadline = getMonoTime() + timeout
   while getMonoTime() < deadline:
+    discard getCurrentSigilThread().pollAll(NonBlocking)
+    discard drainMainThreadWork()
     discard window.animationScheduler().tick(initDuration(milliseconds = 16))
     if expected in view.session().currentTerminalLine():
       return true
@@ -142,6 +147,8 @@ proc tickUntilCurrentLineAfterChange(
 ): bool =
   let deadline = getMonoTime() + timeout
   while getMonoTime() < deadline:
+    discard getCurrentSigilThread().pollAll(NonBlocking)
+    discard drainMainThreadWork()
     discard window.animationScheduler().tick(initDuration(milliseconds = 16))
     if view.session().screenInfo().generation != generation and
         view.session().currentTerminalLine() == expected:
@@ -1408,7 +1415,7 @@ suite "nimkit terminal views":
         check searchMarker notin secondRenderedLine
         check repeat('z', 20) notin secondRenderedTail
 
-  test "attached running views poll from the window animation scheduler":
+  test "attached running views collect output and child exit":
     when defined(posix):
       let
         session = spawnCompactTerminalSession(
@@ -1423,6 +1430,8 @@ suite "nimkit terminal views":
       let deadline = getMonoTime() + initDuration(seconds = 3)
       while ("automatic" notin view.stringValue() or session.running()) and
           getMonoTime() < deadline:
+        discard getCurrentSigilThread().pollAll(NonBlocking)
+        discard drainMainThreadWork()
         discard window.animationScheduler().tick(initDuration(milliseconds = 16))
         sleep(5)
 
@@ -1953,6 +1962,56 @@ suite "nimkit terminal views":
       check window.makeFirstResponder(peer)
       check session.pollUntilExit()
       check "1b 5b 49 1b 5b 4f" in session.normalizedTerminalOutput()
+
+  test "terminal cursor blinks only while its view and window are focused":
+    when defined(posix):
+      let
+        session = spawnCompactTerminalSession(
+          initTerminalSpawnOptions(command = "sleep 10"), columns = 30, rows = 4
+        )
+        view = newTerminalView(session, frame = rect(0, 0, 300, 120))
+        peer = newView(frame = rect(300, 0, 60, 120))
+        root = newView(frame = rect(0, 0, 360, 120))
+        window = newWindow("Terminal cursor focus", frame = rect(0, 0, 360, 120))
+      defer:
+        view.close()
+      peer.acceptsFirstResponder = true
+      root.addSubview(view)
+      root.addSubview(peer)
+      window.setContentView(root)
+      window.setKeyWindow(true)
+      check window.makeFirstResponder(view)
+      check view.cursorVisible
+
+      discard window.animationScheduler().tick(initDuration(milliseconds = 500))
+      check not view.cursorVisible
+      window.setKeyWindow(false)
+      check view.cursorVisible
+      discard window.animationScheduler().tick(initDuration(seconds = 1))
+      check view.cursorVisible
+
+      window.setKeyWindow(true)
+      discard window.animationScheduler().tick(initDuration(milliseconds = 500))
+      check not view.cursorVisible
+      check window.makeFirstResponder(peer)
+      check view.cursorVisible
+      discard window.animationScheduler().tick(initDuration(seconds = 1))
+      check view.cursorVisible
+
+      check window.makeFirstResponder(view)
+      discard window.animationScheduler().tick(initDuration(milliseconds = 500))
+      check not view.cursorVisible
+
+      window.setKeyWindow(false)
+      session.processOutput("\r\x1b[5mX\x1b[25m")
+      discard view.poll()
+      check mttHidden notin view.cellAt(0, 0).traits
+      discard window.animationScheduler().tick(initDuration(milliseconds = 500))
+      check view.cursorVisible
+      check mttHidden in view.cellAt(0, 0).traits
+      discard window.animationScheduler().tick(initDuration(milliseconds = 500))
+      check view.cursorVisible
+      check mttHidden notin view.cellAt(0, 0).traits
 
   test "modifier-click activates OSC hyperlinks through mouse dispatch":
     let

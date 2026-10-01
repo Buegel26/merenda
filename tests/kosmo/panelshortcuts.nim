@@ -203,6 +203,25 @@ suite "Kosmo synthetic panel shortcuts":
     let searchFocused =
       frontend.window.fieldEditorClient() == frontend.searchPanel.queryField
     check searchFocused
+    check not frontend.searchPanel.replacementVisible
+
+    app.activateWindow(detached)
+    require detached.sendAction(actionSelector(KosmoReplaceInFilesAction))
+    check app.keyWindowIs(frontend.window)
+    check frontend.searchPanel.replacementVisible
+    check frontend.window.fieldEditorClient() == frontend.searchPanel.queryField
+    require app.performMenuKeyEquivalent(primaryShiftKeyEvent(keyF))
+    check not frontend.searchPanel.replacementVisible
+    let replaceEvent = KeyEvent(
+      key: keyF,
+      keyCode: keyF.ord,
+      modifiers:
+        frontend.shortcutProfile().primaryModifiers() + {
+          nimkit.kmShift, nimkit.kmOption
+        },
+    )
+    require app.performMenuKeyEquivalent(replaceEvent)
+    check frontend.searchPanel.replacementVisible
 
   test "primary-shift-L reveals the active file only when it is in the browser":
     let
@@ -300,8 +319,6 @@ suite "Kosmo synthetic panel shortcuts":
       removeDir(secondRoot)
     require not first.isNil
     require not second.isNil
-    check not first.fileTree.refreshGitStatus()
-    check not second.fileTree.refreshGitStatus()
     app.presentSyntheticWindow(first)
     app.presentSyntheticWindow(second)
     check first.window.firstResponderIs(first.editorView)

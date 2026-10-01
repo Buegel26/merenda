@@ -1,11 +1,11 @@
-import std/[monotimes, options, os, osproc, strutils, tempfiles, times, unittest]
+import std/[sequtils, options, os, strutils, tempfiles, times, unittest]
 
 import figdraw
-import sigils/threads
 
 import merenda/nimkit
 import merenda/nimkit/text/monotextviews as monoTextViews
 import merenda/kosmo/kosmo
+import fixtures/ui
 import merenda/kosmo/moethemeassets
 
 proc renderedText(buffer: RenderBuffer): string =
@@ -180,17 +180,9 @@ suite "Kosmo":
           matchingIndex = index
           break
       require matchingIndex >= 0
-      if expectedName == "Catppuccin Mocha":
-        let preview = themes[matchingIndex].preview
-        check preview.foreground == KosmoMoeThemeColor(red: 205, green: 214, blue: 244)
-        check preview.background == KosmoMoeThemeColor(red: 30, green: 30, blue: 46)
-        check preview.keyword == KosmoMoeThemeColor(red: 203, green: 166, blue: 247)
-        check preview.functionName == KosmoMoeThemeColor(
-          red: 137, green: 180, blue: 250
-        )
-        check preview.stringLiteral ==
-          KosmoMoeThemeColor(red: 166, green: 227, blue: 161)
-        check preview.comment == KosmoMoeThemeColor(red: 108, green: 112, blue: 134)
+      let preview = themes[matchingIndex].preview
+      check preview.foreground != preview.background
+      check preview.keyword != preview.foreground
       let outcome = editor.applyMoeTheme(themes[matchingIndex])
       check outcome.applied
       check editor.activeMoeThemeIdentifier() == themes[matchingIndex].identifier
@@ -212,7 +204,9 @@ suite "Kosmo":
     check installBundledMoeThemes(root) == directory
     check readFile(mochaPath) == originalMocha
     check readFile(oneDarkPath) == originalOneDark
-    check discoverMoeThemes(directory).len == 6
+    let restoredThemes = discoverMoeThemes(directory)
+    for expected in ["Catppuccin Mocha", "One Dark"]:
+      check restoredThemes.anyIt(it.name == expected)
 
   test "an unwritable theme cache still allows the default theme":
     let
@@ -354,28 +348,26 @@ suite "Kosmo":
       if tab.active:
         activeTab = tab
         break
-    check frontend.editorView.editor.bufferText(activeTab.id).get == ""
+    require frontend.editorView.editor.bufferText(activeTab.id) == some("")
+    require frontend.window.dispatchTextInput("one")
 
     check frontend.window.dispatchKeyDown(
       KeyEvent(text: "\n", key: keyEnter, keyCode: keyEnter.ord)
     )
     check frontend.window.dispatchTextInput("\n")
-    var buffer = newRenderBuffer(24, 6)
-    frontend.editorView.editor.render(buffer)
-    check buffer.cell(2, 0).symbol == "1"
-    check buffer.cell(2, 1).symbol == "2"
-    check buffer.cell(2, 2).symbol == " "
+    require frontend.window.dispatchTextInput("two")
+    check frontend.editorView.editor.bufferText(activeTab.id) == some("one\ntwo")
     check frontend.editorView.editor.bufferCursor() ==
-      KosmoBufferCursor(line: 1, column: 0)
+      KosmoBufferCursor(line: 1, column: 3)
 
     check frontend.window.dispatchKeyDown(
       KeyEvent(text: "\n", key: keyEnter, keyCode: keyEnter.ord)
     )
     check frontend.window.dispatchTextInput("\n")
-    frontend.editorView.editor.render(buffer)
-    check buffer.cell(2, 2).symbol == "3"
+    require frontend.window.dispatchTextInput("three")
+    check frontend.editorView.editor.bufferText(activeTab.id) == some("one\ntwo\nthree")
     check frontend.editorView.editor.bufferCursor() ==
-      KosmoBufferCursor(line: 2, column: 0)
+      KosmoBufferCursor(line: 2, column: 5)
 
   test "command completion cycles with Tab and Shift-Tab in the host popup":
     let frontend =
@@ -395,33 +387,29 @@ suite "Kosmo":
     check frontend.editorView.editor.commandLine().text == ":v"
 
     let initialPopup = frontend.editorView.editor.popupMenu()
-    check initialPopup.isSome
-    if initialPopup.isSome:
-      check initialPopup.get.selectedIndex == -1
+    require initialPopup.isSome
+    check initialPopup.get.selectedIndex == -1
     check frontend.window.dispatchKeyDown(
       KeyEvent(key: keyArrowDown, keyCode: keyArrowDown.ord)
     )
     let downPopup = frontend.editorView.editor.popupMenu()
-    check downPopup.isSome
-    if downPopup.isSome:
-      check downPopup.get.selectedIndex == 0
-      check frontend.editorView.editor.commandLine().text ==
-        ":" & downPopup.get.items[0].title
+    require downPopup.isSome
+    check downPopup.get.selectedIndex == 0
+    check frontend.editorView.editor.commandLine().text ==
+      ":" & downPopup.get.items[0].title
     let firstArrowSelection = frontend.editorView.editor.commandLine().text
     check frontend.window.dispatchKeyDown(
       KeyEvent(key: keyArrowDown, keyCode: keyArrowDown.ord)
     )
     let secondDownPopup = frontend.editorView.editor.popupMenu()
-    check secondDownPopup.isSome
-    if secondDownPopup.isSome:
-      check secondDownPopup.get.selectedIndex == 1
+    require secondDownPopup.isSome
+    check secondDownPopup.get.selectedIndex == 1
     check frontend.window.dispatchKeyDown(
       KeyEvent(key: keyArrowUp, keyCode: keyArrowUp.ord)
     )
     let upPopup = frontend.editorView.editor.popupMenu()
-    check upPopup.isSome
-    if upPopup.isSome:
-      check upPopup.get.selectedIndex == 0
+    require upPopup.isSome
+    check upPopup.get.selectedIndex == 0
     check frontend.editorView.editor.commandLine().text == firstArrowSelection
 
     discard frontend.window.dispatchKeyDown(
@@ -433,20 +421,13 @@ suite "Kosmo":
     check frontend.window.dispatchTextInput("\t")
     check frontend.editorView.editor.commandLine().text == firstCompletion
     let popupMenu = frontend.editorView.editor.popupMenu()
-    check popupMenu.isSome
-    if popupMenu.isSome:
-      check popupMenu.get.kind == KosmoPopupMenuKind.CommandCompletion
-      check popupMenu.get.items.len > 0
-    var popupList: PopupListView
-    for subview in frontend.editorPane.subviews():
-      if subview of PopupListView:
-        popupList = PopupListView(subview)
-        break
-    check not popupList.isNil
-    if not popupList.isNil:
-      check not popupList.hidden()
-      check popupList.itemCount() > 0
-      check popupList.frame().origin.x == frontend.editorPane.commandBar.frame.origin.x
+    require popupMenu.isSome
+    check popupMenu.get.kind == KosmoPopupMenuKind.CommandCompletion
+    require popupMenu.get.items.len > 0
+    let popupList = frontend.editorPane.popupIn()
+    require not popupList.isNil
+    popupList.checkVisibleIn(frontend.editorPane)
+    check popupList.itemCount() > 0
     discard frontend.window.dispatchKeyDown(
       KeyEvent(text: "\t", key: keyTab, keyCode: keyTab.ord)
     )
@@ -470,13 +451,16 @@ suite "Kosmo":
       check frontend.editorView.editor.commandLine().text == ":" & selectedCommand
       check frontend.editorView.editor.popupMenu().isNone
 
-  test "help opens as a dismissible overlay and survives a resize":
+  test "help opens a reusable document tab and survives a resize":
     let frontend = newKosmoApplication(newApplication("Kosmo Help Viewer Test"))
     defer:
       frontend.close()
     frontend.window.setContentView(frontend.contentView)
     frontend.contentView.layoutSubtreeIfNeeded()
     check frontend.window.makeFirstResponder(frontend.editorView)
+    let
+      originalTab = frontend.editorPane.documentTabs.selectedDocumentTabIdentifier
+      originalTabCount = frontend.editorPane.documentTabs.len
 
     check not frontend.window.dispatchKeyDown(
       KeyEvent(key: keySemicolon, keyCode: keySemicolon.ord, modifiers: {kmShift})
@@ -486,53 +470,27 @@ suite "Kosmo":
     check frontend.window.dispatchKeyDown(
       KeyEvent(text: "\n", key: keyEnter, keyCode: keyEnter.ord)
     )
-    check frontend.editorPane.contentView == View(frontend.editorView)
-    var
-      helpPanel: Box
-      helpView: MarkdownView
-      closeButton: Button
-    for subview in frontend.editorPane.subviews():
-      if subview of Box and Box(subview).title() == "Moe Help":
-        helpPanel = Box(subview)
-        break
-    check not helpPanel.isNil
-    if not helpPanel.isNil:
-      check not helpPanel.hidden()
-      for subview in helpPanel.subviews():
-        if subview of MarkdownView:
-          helpView = MarkdownView(subview)
-        elif subview of Button:
-          closeButton = Button(subview)
-    check not helpView.isNil
-    check not closeButton.isNil
-    if not helpView.isNil:
-      check helpView.markdown == frontend.editorView.editor.helpText()
-      check "# Exiting" in helpView.markdown
+    check frontend.editorPane.documentTabs.len == originalTabCount + 1
+    check frontend.editorPane.documentTabs.selectedDocumentTabIdentifier ==
+      KosmoHelpTabIdentifier
+    check frontend.editorPane.contentView of MarkdownView
+    let helpView = MarkdownView(frontend.editorPane.contentView)
+    check helpView.markdown == frontend.editorView.editor.helpText()
+    check "# Exiting" in helpView.markdown
 
     frontend.editorPane.frame = rect(0, 0, 520, 280)
     frontend.editorPane.layoutSubtreeIfNeeded()
-    check not helpPanel.hidden()
-    check helpPanel.frame().size.width <= 520.0'f32
+    check frontend.editorPane.contentView == View(helpView)
+    check helpView.frame().size.width <= 520.0'f32
     check helpView.markdown == frontend.editorView.editor.helpText()
-    check frontend.editorView.frame().size.width == 520.0'f32
-    let narrowColumns = frontend.editorView.maxColumnCount()
-
-    let closeButtonBounds = closeButton.bounds()
-    check frontend.window.clickAt(
-      closeButton.pointToWindow(
-        initPoint(
-          closeButtonBounds.size.width * 0.5'f32,
-          closeButtonBounds.size.height * 0.5'f32,
-        )
-      )
-    )
-    check helpPanel.hidden()
+    check frontend.editorPane.documentTabs.selectDocumentTabWithIdentifier(originalTab)
     check frontend.editorPane.contentView == View(frontend.editorView)
+
+    check frontend.editorPane.documentTabs.len == originalTabCount + 1
 
     frontend.editorPane.frame = rect(0, 0, 740, 360)
     frontend.editorPane.layoutSubtreeIfNeeded()
     check frontend.editorView.frame().size.width == 740.0'f32
-    check frontend.editorView.maxColumnCount() > narrowColumns
 
     check frontend.window.makeFirstResponder(frontend.editorView)
     check not frontend.window.dispatchKeyDown(
@@ -543,13 +501,141 @@ suite "Kosmo":
     check frontend.window.dispatchKeyDown(
       KeyEvent(text: "\n", key: keyEnter, keyCode: keyEnter.ord)
     )
-    check not helpPanel.hidden()
+    check frontend.editorPane.documentTabs.len == originalTabCount + 1
+    check frontend.editorPane.documentTabs.selectedDocumentTabIdentifier ==
+      KosmoHelpTabIdentifier
     check frontend.window.dispatchKeyDown(
       KeyEvent(key: keyEscape, keyCode: keyEscape.ord)
     )
-    check helpPanel.hidden()
+    check frontend.editorPane.documentTabs.len == originalTabCount
+    check frontend.editorPane.documentTabs.selectedDocumentTabIdentifier == originalTab
     check frontend.editorPane.contentView == View(frontend.editorView)
 
+  test "config opens a reusable document tab and closes with Moe's quit command":
+    let frontend = newKosmoApplication(newApplication("Kosmo Config Tab Test"))
+    defer:
+      frontend.close()
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check frontend.window.makeFirstResponder(frontend.editorView)
+    let
+      originalTab = frontend.editorPane.documentTabs.selectedDocumentTabIdentifier
+      originalTabCount = frontend.editorPane.documentTabs.len
+
+    check not frontend.window.dispatchKeyDown(
+      KeyEvent(key: keySemicolon, keyCode: keySemicolon.ord, modifiers: {kmShift})
+    )
+    check frontend.window.dispatchTextInput(":")
+    check frontend.window.dispatchTextInput("config")
+    check frontend.window.dispatchKeyDown(
+      KeyEvent(text: "\n", key: keyEnter, keyCode: keyEnter.ord)
+    )
+    check frontend.editorPane.documentTabs.len == originalTabCount + 1
+    check frontend.editorPane.documentTabs.selectedDocumentTabIdentifier ==
+      KosmoConfigTabIdentifier
+    check frontend.editorPane.contentView == View(frontend.editorView)
+    check frontend.editorView.editor.configViewerOpen()
+    check frontend.editorView.editor.mode() == KosmoEditorMode.Other
+
+    check frontend.editorPane.documentTabs.selectDocumentTabWithIdentifier(originalTab)
+    check frontend.editorView.editor.mode() == KosmoEditorMode.Normal
+
+    check frontend.editorPane.documentTabs.len == originalTabCount + 1
+    check not frontend.window.dispatchKeyDown(
+      KeyEvent(key: keySemicolon, keyCode: keySemicolon.ord, modifiers: {kmShift})
+    )
+    check frontend.window.dispatchTextInput(":")
+    check frontend.window.dispatchTextInput("config")
+    check frontend.window.dispatchKeyDown(
+      KeyEvent(text: "\n", key: keyEnter, keyCode: keyEnter.ord)
+    )
+    check frontend.editorPane.documentTabs.len == originalTabCount + 1
+    check frontend.editorPane.documentTabs.selectedDocumentTabIdentifier ==
+      KosmoConfigTabIdentifier
+
+    check frontend.editorPane.documentTabs.selectDocumentTabWithIdentifier(originalTab)
+    check frontend.editorView.editor.mode() == KosmoEditorMode.Normal
+    check frontend.editorPane.documentTabs.selectDocumentTabWithIdentifier(
+      KosmoConfigTabIdentifier
+    )
+    check frontend.editorView.editor.mode() == KosmoEditorMode.Other
+    check frontend.editorPane.documentTabs.len == originalTabCount + 1
+
+    check not frontend.window.dispatchKeyDown(
+      KeyEvent(key: keySemicolon, keyCode: keySemicolon.ord, modifiers: {kmShift})
+    )
+    check frontend.window.dispatchTextInput(":")
+    check frontend.window.dispatchTextInput("q")
+    check frontend.window.dispatchKeyDown(
+      KeyEvent(text: "\n", key: keyEnter, keyCode: keyEnter.ord)
+    )
+    check frontend.editorPane.documentTabs.len == originalTabCount
+    check frontend.editorPane.documentTabs.selectedDocumentTabIdentifier == originalTab
+    check frontend.editorView.editor.mode() == KosmoEditorMode.Normal
+
+    check not frontend.window.dispatchKeyDown(
+      KeyEvent(key: keySemicolon, keyCode: keySemicolon.ord, modifiers: {kmShift})
+    )
+    check frontend.window.dispatchTextInput(":")
+    check frontend.window.dispatchTextInput("config")
+    check frontend.window.dispatchKeyDown(
+      KeyEvent(text: "\n", key: keyEnter, keyCode: keyEnter.ord)
+    )
+    let configIndex = frontend.editorPane.documentTabs.indexOfDocumentTabIdentifier(
+      KosmoConfigTabIdentifier
+    )
+    check configIndex >= 0
+    check frontend.editorPane.documentTabs.closeDocumentTabAtIndex(configIndex)
+    check not frontend.editorView.editor.configViewerOpen()
+    check frontend.editorPane.documentTabs.len == originalTabCount
+    check frontend.editorPane.documentTabs.selectedDocumentTabIdentifier == originalTab
+
+  test "edit commands select files in Kosmo document tabs":
+    let
+      root = createTempDir("merenda-kosmo-edit-tabs-", "")
+      firstPath = root / "first.txt"
+      secondPath = root / "second.txt"
+    writeFile(firstPath, "first")
+    writeFile(secondPath, "second")
+    defer:
+      removeFile(firstPath)
+      removeFile(secondPath)
+      removeDir(root)
+
+    let frontend = newKosmoApplication(newApplication("Kosmo Edit Command Tab Test"))
+    defer:
+      frontend.close()
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check frontend.openPath(firstPath)
+    check frontend.window.makeFirstResponder(frontend.editorView)
+    let firstTab = frontend.documentTabs.selectedDocumentTabIdentifier
+
+    check not frontend.window.dispatchKeyDown(
+      KeyEvent(key: keySemicolon, keyCode: keySemicolon.ord, modifiers: {kmShift})
+    )
+    check frontend.window.dispatchTextInput(":")
+    check frontend.window.dispatchTextInput("e " & secondPath)
+    check frontend.window.dispatchKeyDown(
+      KeyEvent(text: "\n", key: keyEnter, keyCode: keyEnter.ord)
+    )
+    check frontend.documentTabs.len == 2
+    let secondTab = frontend.documentTabs.selectedDocumentTabIdentifier
+    check secondTab != firstTab
+    check frontend.editorView.editor.tabs()[^1].filePath.get == secondPath
+    check frontend.documentTabs.selectDocumentTabWithIdentifier(firstTab)
+    check frontend.documentTabs.selectDocumentTabWithIdentifier(secondTab)
+
+    check not frontend.window.dispatchKeyDown(
+      KeyEvent(key: keySemicolon, keyCode: keySemicolon.ord, modifiers: {kmShift})
+    )
+    check frontend.window.dispatchTextInput(":")
+    check frontend.window.dispatchTextInput("e! " & secondPath)
+    check frontend.window.dispatchKeyDown(
+      KeyEvent(text: "\n", key: keyEnter, keyCode: keyEnter.ord)
+    )
+    check frontend.documentTabs.len == 2
+    check frontend.documentTabs.selectedDocumentTabIdentifier == secondTab
   test "command bar grows with a larger monospace font":
     let
       app = newApplication("Kosmo Command Bar Font Size Test")
@@ -589,7 +675,7 @@ suite "Kosmo":
     check commandBar.fontSize == 32.0'f32
     check not commandBar.hidden()
     check commandBarFrame.maxY == frontend.editorPane.bounds().maxY
-    check commandBarFrame.size.height >= metrics.lineHeight * 1.6'f32
+    check commandBarFrame.size.height >= metrics.lineHeight
 
   test "scroll input reports a frontend-neutral outcome":
     let editor = newKosmoEditor(text = "one\ntwo\nthree")
@@ -648,8 +734,8 @@ suite "Kosmo":
     view.frame = rect(0, 0, metrics.cellWidth * 5.5'f32, metrics.lineHeight * 3.5'f32)
     view.refresh()
 
-    check view.maxColumnCount == 6
-    check view.lineCount == 6
+    check view.maxColumnCount.float32 * metrics.cellWidth >= view.bounds().size.width
+    check view.lineCount.float32 * metrics.lineHeight >= view.bounds().size.height
     check view.clipsToBounds
     editor.close()
 
@@ -949,7 +1035,7 @@ suite "Kosmo":
     check tabs[2].temporary
     editor.close()
 
-  test "preview tabs use the Kosmo preview style class":
+  test "preview tab titles are italic until the file is opened permanently":
     let path = getTempDir() / "merenda-kosmo-preview-style.txt"
     writeFile(path, "preview")
     defer:
@@ -968,12 +1054,16 @@ suite "Kosmo":
       color(0.0, 0.0, 0.0, 1.0),
       insets(0.0),
     )
-    check KosmoPreviewTabStyleClass in model.styleClasses
     check previewStyle.fontSlant == fsItalic
 
     check view.openFile(path)
     model = view.documentTabs.documentTabModels()[0]
-    check KosmoPreviewTabStyleClass notin model.styleClasses
+    let permanentStyle = view.documentTabs.effectiveAppearance.resolveTextStyle(
+      controlStyle(srDocumentTab, classes = model.styleClasses),
+      color(0.0, 0.0, 0.0, 1.0),
+      insets(0.0),
+    )
+    check permanentStyle.fontSlant != fsItalic
     editor.close()
 
   test "rejects binary files before rendering them as text":

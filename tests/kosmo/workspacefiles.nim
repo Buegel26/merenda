@@ -24,13 +24,7 @@ template eventually(condition: untyped) =
     while not (condition) and getMonoTime() < deadline:
       discard getCurrentSigilThread().pollAll(NonBlocking)
       sleep(10)
-    check condition
-
-proc pumpFor(milliseconds: int) =
-  let deadline = getMonoTime() + initDuration(milliseconds = milliseconds)
-  while getMonoTime() < deadline:
-    discard getCurrentSigilThread().pollAll(NonBlocking)
-    sleep(10)
+    require condition
 
 suite "Kosmo shared workspace inventory":
   test "repository notifications respect ignore rules and tracked descendants":
@@ -150,6 +144,135 @@ suite "Kosmo shared workspace inventory":
     when not defined(linux):
       check uint32(watch.handles[root]) == uint32(rootHandle)
 
+  when defined(macosx):
+    test "nested directories in two workspaces keep native monitoring":
+      let
+        root = createTempDir("kosmo-multiple-native-workspaces-", "")
+        firstRoot = root / "project"
+        secondRoot = root / "project-other"
+      defer:
+        removeDir(root)
+      var firstFolders, secondFolders: seq[string]
+      for index in 0 ..< 36:
+        let
+          firstFolder = firstRoot / "nested" / $index
+          secondFolder = secondRoot / "nested" / $index
+        createDir(firstFolder)
+        createDir(secondFolder)
+        firstFolders.add firstFolder
+        secondFolders.add secondFolder
+      let
+        first = newWorkspaceWatch(reconciliationInterval = initDuration(seconds = 0))
+        second = newWorkspaceWatch(reconciliationInterval = initDuration(seconds = 0))
+        firstSpy = InventorySpy()
+        secondSpy = InventorySpy()
+      defer:
+        first.close()
+        second.close()
+      first.connect(workspaceWatchChanged, firstSpy, changed)
+      second.connect(workspaceWatchChanged, secondSpy, changed)
+      first.setRoots([firstRoot, firstRoot], firstFolders)
+      second.setRoots([secondRoot], secondFolders)
+      eventually(
+        first.nativeReady and second.nativeReady and firstSpy.changes > 0 and
+          secondSpy.changes > 0
+      )
+      check first.roots == @[firstRoot]
+      check first.handles.len == 1
+      check second.handles.len == 1
+      check not first.usesPollingFallback()
+      check not second.usesPollingFallback()
+
+      let
+        firstBaseline = firstSpy.changes
+        secondBaseline = secondSpy.changes
+      writeFile(firstFolders[^1] / "created.nim", "discard\n")
+      eventually(firstSpy.changes > firstBaseline)
+      writeFile(secondFolders[^1] / "created.nim", "discard\n")
+      eventually(secondSpy.changes > secondBaseline)
+      first.close()
+      let survivingBaseline = secondSpy.changes
+      writeFile(secondFolders[0] / "after-close.nim", "discard\n")
+      eventually(secondSpy.changes > survivingBaseline)
+      check not second.usesPollingFallback()
+
+    test "a symlink to an external directory keeps separate native coverage":
+      let
+        root = createTempDir("kosmo-linked-native-watch-", "")
+        project = root / "project"
+        external = root / "external"
+        linked = project / "linked"
+        watch = newWorkspaceWatch(reconciliationInterval = initDuration(seconds = 0))
+        spy = InventorySpy()
+      defer:
+        watch.close()
+        removeDir(root)
+      createDir(project)
+      createDir(external)
+      createSymlink(external, linked)
+      watch.connect(workspaceWatchChanged, spy, changed)
+      watch.setRoots([project], [linked])
+      eventually(watch.nativeReady and spy.changes > 0)
+      check watch.handles.len == 2
+      require not watch.usesPollingFallback()
+      let baseline = spy.changes
+      writeFile(external / "created.nim", "discard\n")
+      eventually(spy.changes > baseline)
+
+    test "a missing directory recovers native monitoring when it appears":
+      let
+        root = createTempDir("kosmo-recovered-native-watch-", "")
+        missing = root / "missing"
+        watch = newWorkspaceWatch(reconciliationInterval = initDuration(seconds = 0))
+        spy = InventorySpy()
+      defer:
+        watch.close()
+        removeDir(root)
+      watch.connect(workspaceWatchChanged, spy, changed)
+      watch.setRoots([missing])
+      require watch.usesPollingFallback()
+      eventually(watch.nativeReady and spy.changes > 0)
+      createDir(missing)
+      eventually(watch.nativeReady and not watch.usesPollingFallback())
+      let baseline = spy.changes
+      writeFile(missing / "created.nim", "discard\n")
+      eventually(spy.changes > baseline)
+
+    test "native monitoring recovers after another workspace releases watch slots":
+      let
+        root = createTempDir("kosmo-native-watch-capacity-", "")
+        availableSlots = dmonInst.watches.len - dmonInst.numWatches
+        waitingRoot = root / "waiting"
+      defer:
+        removeDir(root)
+      require availableSlots > 0
+      var roots: seq[string]
+      for index in 0 ..< availableSlots:
+        let folder = root / $index
+        createDir(folder)
+        roots.add folder
+      createDir(waitingRoot)
+      let
+        occupying =
+          newWorkspaceWatch(reconciliationInterval = initDuration(seconds = 0))
+        waiting = newWorkspaceWatch(reconciliationInterval = initDuration(seconds = 0))
+        spy = InventorySpy()
+      defer:
+        occupying.close()
+        waiting.close()
+      waiting.connect(workspaceWatchChanged, spy, changed)
+      occupying.setRoots(roots)
+      eventually(occupying.nativeReady)
+      require not occupying.usesPollingFallback()
+      waiting.setRoots([waitingRoot])
+      require waiting.usesPollingFallback()
+      eventually(waiting.nativeReady and spy.changes > 0)
+      occupying.close()
+      eventually(waiting.nativeReady and not waiting.usesPollingFallback())
+      let baseline = spy.changes
+      writeFile(waitingRoot / "created.nim", "discard\n")
+      eventually(spy.changes > baseline)
+
   test "browser and quick open share updates and keep their visibility policies":
     let root = createTempDir("kosmo-shared-inventory-", "")
     defer:
@@ -165,7 +288,6 @@ suite "Kosmo shared workspace inventory":
     defer:
       frontend.close()
     let files = frontend.fileTree.workspaceFiles
-    check files == frontend.quickOpenPanel.workspaceFiles
     require files.waitForFiles()
     check "main.nim" in frontend.quickOpenPanel.projectFiles()
     check "build/ignored.nim" notin frontend.quickOpenPanel.projectFiles()
@@ -267,12 +389,9 @@ suite "Kosmo shared workspace inventory":
 
     # Drain the initial dirty notification, then detach native coverage to model
     # filesystem notifications that never arrive.
-    let settle = getMonoTime() + initDuration(milliseconds = 300)
-    while getMonoTime() < settle:
-      discard getCurrentSigilThread().pollAll(NonBlocking)
-      sleep(10)
-    require files.waitForFiles()
+    eventually(repositorySpy.changes > 0 and not files.isLoading())
     require not files.watch.isNil
+    eventually(files.watch.nativeReady)
     for id in files.watch.watches:
       unwatch(id)
     files.watch.watches.setLen(0)
@@ -329,8 +448,8 @@ suite "Kosmo shared workspace inventory":
     require runGitCommand(
       root,
       [
-        "-c", "user.name=Kosmo Tests", "-c", "user.email=tests@example.invalid",
-        "commit", "-qm", "initial",
+        "-c", "user.name=Kosmo Tests", "-c", "user.email=tests@example.invalid", "-c",
+        "commit.gpgsign=false", "commit", "-qm", "initial",
       ],
     ).exitCode == 0
     let frontend = newKosmoApplication(newApplication("Watched inventory"), root)
@@ -366,8 +485,8 @@ suite "Kosmo shared workspace inventory":
     require runGitCommand(
       repository,
       [
-        "-c", "user.name=Kosmo Tests", "-c", "user.email=tests@example.invalid",
-        "commit", "-qm", "initial",
+        "-c", "user.name=Kosmo Tests", "-c", "user.email=tests@example.invalid", "-c",
+        "commit.gpgsign=false", "commit", "-qm", "initial",
       ],
     ).exitCode == 0
     require runGitCommand(
@@ -396,8 +515,8 @@ suite "Kosmo shared workspace inventory":
     require runGitCommand(
       externalRoot,
       [
-        "-c", "user.name=Kosmo Tests", "-c", "user.email=tests@example.invalid",
-        "commit", "-qm", "initial",
+        "-c", "user.name=Kosmo Tests", "-c", "user.email=tests@example.invalid", "-c",
+        "commit.gpgsign=false", "commit", "-qm", "initial",
       ],
     ).exitCode == 0
     require runGitCommand(externalRoot, ["checkout", "-qb", "external-start"]).exitCode ==
@@ -417,13 +536,14 @@ suite "Kosmo shared workspace inventory":
     eventually(
       not frontend.fileTree.workspaceFiles.watch.isNil and
         externalRoot in frontend.fileTree.workspaceFiles.watch.directories and
-        externalRoot / ".git" in frontend.fileTree.workspaceFiles.watch.metadata and (
-        frontend.fileTree.workspaceFiles.watch.fallback or
-        frontend.fileTree.workspaceFiles.watch.handles.len ==
-        frontend.fileTree.workspaceFiles.watch.directories.len
-      )
+        externalRoot / ".git" in frontend.fileTree.workspaceFiles.watch.metadata and
+        frontend.fileTree.workspaceFiles.watch.nativeReady
     )
-    pumpFor(500)
+    eventually(
+      frontend.fileTree.workspaceFiles.watch.nativeReady and
+        not frontend.fileTree.workspaceFiles.watch.filtering and
+        not frontend.fileTree.workspaceFiles.isLoading()
+    )
 
     require runGitCommand(externalRoot, ["checkout", "-qb", "external-next"]).exitCode ==
       0

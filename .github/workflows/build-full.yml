@@ -4,7 +4,7 @@ on:
     - "main"
   pull_request:
     branches:
-    - "*"
+    - "**"
 
 jobs:
   tests:
@@ -108,6 +108,11 @@ jobs:
           ! -name '*.nims' \
           -delete
 
+    - name: Record macOS test crash-report boundary
+      if: runner.os == 'macOS'
+      run: |
+        touch "$RUNNER_TEMP/merenda-test-start"
+
     - name: Compile NimKit tests
       run: |
         atlas-run tests --compile-only --compiler-output tnimkit.nim \
@@ -182,8 +187,93 @@ jobs:
           "$testExecutable"
         fi
 
+    - name: Collect macOS test crash reports
+      if: failure() && runner.os == 'macOS'
+      run: |
+        shopt -s nullglob
+        reportOutput="$RUNNER_TEMP/merenda-test-crash-reports"
+        reportBoundary="$RUNNER_TEMP/merenda-test-start"
+        mkdir -p "$reportOutput"
+        # ReportCrash can write its report shortly after the process exits.
+        reportDeadline=$((SECONDS + 30))
+        while (( SECONDS < reportDeadline )); do
+          for reportDirectory in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+            for report in "$reportDirectory"/{tnimkit,tkosmo,ttekton,tintegrations}*.{ips,crash}; do
+              if [[ -f "$report" && -f "$reportBoundary" && "$report" -nt "$reportBoundary" ]]; then
+                cp "$report" "$reportOutput/"
+              fi
+            done
+          done
+          reports=("$reportOutput"/*)
+          if (( ${#reports[@]} > 0 )); then
+            printf 'Collected %s current-job test crash report(s).\n' "${#reports[@]}"
+            break
+          fi
+          sleep 1
+        done
+
+    - name: Upload macOS test crash reports
+      if: failure() && runner.os == 'macOS'
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-test-crash-reports-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/merenda-test-crash-reports/
+        if-no-files-found: warn
+        retention-days: 7
+
+  ownership-sanitizers:
+    name: NimKit ownership sanitizers (ARC and ORC, Linux)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Cache packages
+      uses: actions/cache@v4
+      with:
+        path: deps/
+        key: ${{ runner.os }}-nim2.2.10-${{ hashFiles('merenda.nimble', 'nim.cfg') }}
+
+    - name: Install latest Atlas and set up Nim
+      run: |
+        mkdir -p "$HOME/.local/bin"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        bash .github/scripts/install-atlas.sh
+        "$HOME/.local/bin/atlas" env "2.2.10" --binary --github-path
+
+    - name: Setup software OpenGL/Vulkan (Mesa) + Xvfb (X11)
+      timeout-minutes: 30
+      run: |
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          clang \
+          xvfb \
+          xauth \
+          libx11-xcb-dev \
+          libxcb1-dev \
+          libxcursor-dev \
+          libxkbcommon-dev \
+          libxrender-dev \
+          libgl1-mesa-dev \
+          libgles2-mesa-dev \
+          libegl1-mesa-dev \
+          mesa-utils \
+          vulkan-tools \
+          mesa-vulkan-drivers \
+          libvulkan1 \
+          libgl1-mesa-dri \
+          libglx-mesa0 \
+          libegl-mesa0 \
+          libgles2
+
+    - name: Install Deps
+      run: |
+        atlas -tu --features:kosmo install
+
     - name: Check ARC ownership with sanitizers
-      if: runner.os == 'Linux'
       timeout-minutes: 10
       env:
         UBSAN_OPTIONS: halt_on_error=1
@@ -193,7 +283,6 @@ jobs:
           -d:nimkitOwnershipTests -d:nimkitSanitizers
 
     - name: Check ORC ownership with sanitizers
-      if: runner.os == 'Linux'
       timeout-minutes: 10
       env:
         UBSAN_OPTIONS: halt_on_error=1:suppressions=.github/ubsan.supp

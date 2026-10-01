@@ -1,4 +1,4 @@
-version       = "0.22.0"
+version       = "0.25.2"
 author        = "Jaremy Creechley"
 description   = "Nim-native UI toolkit"
 license       = "BSD-3-Clause"
@@ -21,18 +21,23 @@ requires "cborious"
 requires "unicodedb >= 0.14.0"
 requires "faststreams >= 0.5.1"
 requires "gh:elcritch/nim-markdown#fix/arc-emphasis-ownership[regex]"
-requires "gh:elcritch/matter >= 0.5.0"
-requires "gh:elcritch/terminex >= 0.3.2"
+# Compiled grammar ownership must reclaim recursive rules under ARC.
+requires "gh:elcritch/matter#80a1e67815da0e6af2d17a24d26378ae5ae0fdcc"
+# Keep search and replacement on the same Reni scanner used by Matter.
+requires "gh:fox0430/reni#7703aa83d8bbd358872bbab388b2c62e6798b88a"
+# Budgeted reads must preserve final output until the PTY has been drained.
+requires "gh:elcritch/terminex#143c79018554c4e81a329a9a898e176df0a92344"
 requires "gh:Araq/iconbundler"
 requires "libbacktrace"
 requires "zippy >= 0.10.20"
-requires "gh:elcritch/dmon-nim >= 0.5.1"
+requires "gh:elcritch/dmon-nim >= 0.5.2"
 
 feature "uirelays":
   requires "gh:nim-lang/uirelays#688dd44"
 
 feature "kosmo":
-  requires "gh:elcritch/moe#feat/kosmo-host-ui"
+  # Upstream develop includes the host result hook merged in Moe PR #3332.
+  requires "gh:fox0430/moe#22c74002ff653b0d6ee88e712160d837b4850986"
 
 feature "references":
   requires "https://github.com/ravynsoft/ravynos"

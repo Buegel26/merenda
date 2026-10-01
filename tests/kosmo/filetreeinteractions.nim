@@ -1,10 +1,10 @@
-import std/[monotimes, os, strutils, tempfiles, times, unicode, unittest]
+import std/[os, strutils, tempfiles, unicode, unittest]
 
 import figdraw
-import sigils/[core, threads]
 
 import merenda/nimkit
 import merenda/kosmo/[kosmo, workspacefiles]
+import fixtures/ui
 
 proc renderedText(node: Fig): string =
   for glyphIndex in 0 ..< node.textLayout.glyphCount():
@@ -100,7 +100,6 @@ suite "Kosmo file tree interactions":
     let
       root = createTempDir("merenda-kosmo-tree-git-redraw-", "")
       ignoredPath = root / "ignored.log"
-      ignoredColor = color(0.50, 0.52, 0.56, 0.72)
     writeFile(ignoredPath, "ignored")
     let tree = newKosmoFileTree(root, frame = rect(0, 0, 300, 120))
     defer:
@@ -109,7 +108,7 @@ suite "Kosmo file tree interactions":
 
     tree.displayMode = FileTreeDisplayMode.AllFiles
     discard buildRenders(tree)
-    check not tree.rendersTextWithColor("ignored.log", ignoredColor)
+    let originalColor = tree.outlineItemWithIdentifier(ignoredPath).decoration.color
 
     tree.applyGitStatus(
       GitStatusSnapshot(
@@ -119,7 +118,10 @@ suite "Kosmo file tree interactions":
       )
     )
 
-    check tree.rendersTextWithColor("ignored.log", ignoredColor)
+    let ignoredColor = tree.outlineItemWithIdentifier(ignoredPath).decoration.color
+    require ignoredColor.isSome
+    check ignoredColor != originalColor
+    check tree.rendersTextWithColor("ignored.log", ignoredColor.get())
 
   test "hover input redraws the highlighted row":
     let
@@ -172,11 +174,13 @@ suite "Kosmo file tree interactions":
     check window.scrollWheelAt(
       tree.pointToWindow(initPoint(40.0'f32, 40.0'f32)), deltaY = -3.0'f32
     )
-    check tree.firstVisibleIndex() == 3
-    check tree.renderedTextStartingWith("02-row") == "02-row.txt"
+    check tree.firstVisibleIndex() > 0
+    let visibleName =
+      tree.itemAtRow(tree.firstVisibleIndex()).identifier.extractFilename()
+    check tree.renderedTextStartingWith(visibleName) == visibleName
     check tree.renderedTextStartingWith("00-row").len == 0
 
-  test "filesystem refresh retains the wheel-scrolled file list position":
+  test "filesystem refresh retains the fractional wheel-scrolled file list position":
     let root = createTempDir("merenda-kosmo-tree-refresh-scroll-", "")
     for index in 0 ..< 24:
       writeFile(root / align($index, 2, '0') & "-row.txt", "row " & $index)
@@ -200,19 +204,92 @@ suite "Kosmo file tree interactions":
     )
     check tree.selectedItemIdentifier() == selectedPath
     require window.scrollWheelAt(
-      tree.pointToWindow(initPoint(40.0'f32, 40.0'f32)), deltaY = -8.0'f32
+      tree.pointToWindow(initPoint(40.0'f32, 40.0'f32)), deltaY = -8.5'f32
     )
     let scrolledOffset = tree.scrollView().contentOffset()
-    require scrolledOffset.y > 0.0'f32
+    require scrolledOffset.y == 8.5'f32 * tree.rowHeight()
 
     writeFile(createdPath, "created")
-    tree.workspaceFiles.refresh()
-    let deadline = getMonoTime() + initDuration(seconds = 60)
-    while tree.rowForItem(createdPath) < 0 and getMonoTime() < deadline:
-      discard getCurrentSigilThread().pollAll(NonBlocking)
-      sleep(10)
+    tree.refresh()
+    check tree.scrollView().contentOffset() == scrolledOffset
+    require tree.workspaceFiles.waitForFiles(timeoutMilliseconds = 60_000)
     require tree.rowForItem(createdPath) >= 0
     check tree.scrollView().contentOffset() == scrolledOffset
+
+  test "Git refresh leaves a partially visible selected file in place":
+    let root = createTempDir("merenda-kosmo-tree-git-scroll-", "")
+    for index in 0 ..< 24:
+      writeFile(root / align($index, 2, '0') & "-row.txt", "row " & $index)
+    let
+      window = newWindow("Kosmo File Tree Git Refresh", frame = rect(0, 0, 300, 98))
+      tree = newKosmoFileTree(root, frame = rect(0, 0, 300, 98))
+      selectedPath = root / "07-row.txt"
+    defer:
+      window.close()
+      tree.workspaceFiles.close()
+      removeDir(root)
+    window.setContentView(tree)
+    require tree.workspaceFiles.waitForFiles()
+    tree.selectedItemIdentifier = selectedPath
+    let
+      selectedRow = tree.rowForItem(selectedPath)
+      scrolledOffset =
+        initPoint(0.0'f32, (selectedRow.float32 + 0.5'f32) * tree.rowHeight())
+    tree.scrollView().contentOffset = scrolledOffset
+    require tree.selectedItemIdentifier() == selectedPath
+    require tree.firstVisibleIndex() == selectedRow
+
+    for state in [gfsModified, gfsAdded, gfsModified]:
+      tree.applyGitStatus(
+        GitStatusSnapshot(
+          rootPath: absolutePath(root),
+          isRepository: true,
+          entries: @[GitStatusEntry(path: selectedPath, state: state)],
+        )
+      )
+      discard buildRenders(tree)
+      check tree.selectedItemIdentifier() == selectedPath
+      check tree.scrollView().contentOffset() == scrolledOffset
+
+  test "filesystem refresh anchors visible files when earlier rows change":
+    let root = createTempDir("merenda-kosmo-tree-refresh-anchor-", "")
+    for index in 0 ..< 24:
+      writeFile(root / align($index, 2, '0') & "-row.txt", "row " & $index)
+    let
+      tree = newKosmoFileTree(root, frame = rect(0, 0, 300, 98))
+      selectedPath = root / "07-row.txt"
+      createdPath = root / "00-created.txt"
+    defer:
+      tree.workspaceFiles.close()
+      removeDir(root)
+    require tree.workspaceFiles.waitForFiles(timeoutMilliseconds = 60_000)
+    tree.selectedItemIdentifier = selectedPath
+    discard buildRenders(tree)
+    let offset = initPoint(
+      0.0'f32, (tree.rowForItem(selectedPath).float32 + 0.5'f32) * tree.rowHeight()
+    )
+    tree.scrollView().contentOffset = offset
+    let nextRowY = tree.rowItemRect(tree.rowForItem(selectedPath) + 1).origin.y
+    require nextRowY > 0.0'f32
+
+    writeFile(createdPath, "created")
+    tree.refresh()
+    check tree.selectedItemIdentifier() == selectedPath
+    check tree.scrollView().contentOffset().y == offset.y + tree.rowHeight()
+    check tree.rowItemRect(tree.rowForItem(selectedPath) + 1).origin.y == nextRowY
+    require tree.workspaceFiles.waitForFiles(timeoutMilliseconds = 60_000)
+    discard buildRenders(tree)
+    check tree.selectedItemIdentifier() == selectedPath
+    check tree.scrollView().contentOffset().y == offset.y + tree.rowHeight()
+    check tree.rowItemRect(tree.rowForItem(selectedPath) + 1).origin.y == nextRowY
+
+    removeFile(createdPath)
+    tree.refresh()
+    require tree.workspaceFiles.waitForFiles(timeoutMilliseconds = 60_000)
+    discard buildRenders(tree)
+    check tree.selectedItemIdentifier() == selectedPath
+    check tree.scrollView().contentOffset() == offset
+    check tree.rowItemRect(tree.rowForItem(selectedPath) + 1).origin.y == nextRowY
 
   test "display scopes retain folders leading to visible and changed files":
     let
@@ -258,11 +335,12 @@ suite "Kosmo file tree interactions":
       GitStatusSnapshot(
         rootPath: absolutePath(root),
         isRepository: true,
-        entries: @[
-          GitStatusEntry(path: changedFile, state: gfsModified),
-          GitStatusEntry(path: deletedFile, state: gfsDeleted),
-          GitStatusEntry(path: unicodeDeletedFile, state: gfsDeleted),
-        ],
+        entries:
+          @[
+            GitStatusEntry(path: changedFile, state: gfsModified),
+            GitStatusEntry(path: deletedFile, state: gfsDeleted),
+            GitStatusEntry(path: unicodeDeletedFile, state: gfsDeleted),
+          ],
       )
     )
     tree.displayMode = FileTreeDisplayMode.SourceControlChanges
@@ -306,10 +384,11 @@ suite "Kosmo file tree interactions":
       GitStatusSnapshot(
         rootPath: absolutePath(root),
         isRepository: true,
-        entries: @[
-          GitStatusEntry(path: ignoredFolder, state: gfsIgnored),
-          GitStatusEntry(path: ignoredFile, state: gfsIgnored),
-        ],
+        entries:
+          @[
+            GitStatusEntry(path: ignoredFolder, state: gfsIgnored),
+            GitStatusEntry(path: ignoredFile, state: gfsIgnored),
+          ],
       )
     )
     check tree.rowForItem(ignoredFolder) < 0
@@ -538,10 +617,11 @@ suite "Kosmo file tree interactions":
       )
     )
     check panel.scopeButton.popupOpen()
-    require panel.subviews()[^1] of PopupListView
-    let
-      popup = PopupListView(panel.subviews()[^1])
-      itemBounds = popup.popupListItemRect(popup.bounds(), 2)
+    let popup = panel.popupIn()
+    require not popup.isNil
+    let changedIndex = popup.choiceIndex("Changed Files")
+    require changedIndex >= 0
+    let itemBounds = popup.popupListItemRect(popup.bounds(), changedIndex)
     check window.clickAt(
       popup.pointToWindow(
         initPoint(
@@ -561,10 +641,11 @@ suite "Kosmo file tree interactions":
       FileTreeDisplayMode.SourceControlChanges, FileTreeDisplayMode.AllFiles,
     ]:
       panel.scopeButton.openPopup()
-      require panel.subviews()[^1] of PopupListView
-      let
-        scopePopup = PopupListView(panel.subviews()[^1])
-        choiceBounds = scopePopup.popupListItemRect(scopePopup.bounds(), mode.ord)
+      let scopePopup = panel.popupIn()
+      require not scopePopup.isNil
+      let choice = scopePopup.choiceIndex(mode.title())
+      require choice >= 0
+      let choiceBounds = scopePopup.popupListItemRect(scopePopup.bounds(), choice)
       check window.clickAt(
         scopePopup.pointToWindow(
           initPoint(
@@ -576,7 +657,7 @@ suite "Kosmo file tree interactions":
       check tree.displayMode == mode
       check panel.scopeButton.title == mode.title()
       for index, item in panel.scopeButton.menu().items():
-        check item.state == (if index == mode.ord: bsOn else: bsOff)
+        check item.state == (if item.title == mode.title(): bsOn else: bsOff)
       if mode != FileTreeDisplayMode.SourceControlChanges:
         check tree.rowForItem(otherFile) >= 0
 

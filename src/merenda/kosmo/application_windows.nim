@@ -23,10 +23,10 @@ protocol KosmoContentCommandDispatch of nimkit.ResponderCommandDispatchProtocol:
       if content.onRevealActiveFile.isNil:
         return false
       content.onRevealActiveFile()
-    of KosmoFindInFilesAction:
+    of KosmoFindInFilesAction, KosmoReplaceInFilesAction:
       if content.onFindInFiles.isNil:
         return false
-      content.onFindInFiles()
+      content.onFindInFiles($args.selector.name == KosmoReplaceInFilesAction)
     of KosmoQuickOpenAction:
       if content.onQuickOpen.isNil:
         return false
@@ -39,13 +39,17 @@ proc newKosmoContentView(
     splitView: nimkit.SplitView,
     statusLabel: nimkit.Label,
     quickOpenPanel: KosmoQuickOpenPanel,
+    hasFileBrowser: bool,
 ): KosmoContentView =
   result = KosmoContentView(
-    splitView: splitView, statusLabel: statusLabel, quickOpenPanel: quickOpenPanel
+    splitView: splitView,
+    statusBar: newKosmoStatusBar(statusLabel, withSidebarButtons = hasFileBrowser),
+    statusLabel: statusLabel,
+    quickOpenPanel: quickOpenPanel,
   )
   result.initViewFields()
   result.addSubview(splitView)
-  result.addSubview(statusLabel)
+  result.addSubview(result.statusBar)
   result.addSubview(quickOpenPanel)
   discard result.withProtocol(KosmoContentLayout)
   discard result.withProtocol(KosmoContentCommandDispatch)
@@ -57,6 +61,8 @@ proc showFileExplorer*(frontend: KosmoApplication): bool {.discardable.} =
     return
   if not frontend.sidebarTabs.selectCompactTabAtIndex(0):
     return
+  frontend.splitView.setPaneCollapsed(0, false)
+  frontend.syncSidebarButtons()
   result = frontend.window.makeFirstResponder(frontend.fileTree)
   if result:
     frontend.dockController.activatePanelWindow(frontend.window)
@@ -82,17 +88,37 @@ proc revealActiveFile*(frontend: KosmoApplication): bool {.discardable.} =
         result = frontend.showFileExplorer()
       return
 
-proc showFindInFiles*(frontend: KosmoApplication): bool {.discardable.} =
-  ## Select the find sidebar tab and focus its search query.
+proc showFindInFiles*(
+    frontend: KosmoApplication, replacing = false
+): bool {.discardable.} =
+  ## Focus file search, showing replacement only when explicitly requested.
   if frontend.isNil or not frontend.hasFileBrowser() or frontend.sidebarTabs.isNil or
       frontend.searchPanel.isNil:
     return
   frontend.searchPanel.rootPaths = frontend.fileTree.rootPaths
   if not frontend.sidebarTabs.selectCompactTabAtIndex(1):
     return
+  frontend.splitView.setPaneCollapsed(0, false)
+  frontend.syncSidebarButtons()
+  frontend.searchPanel.replacementVisible = replacing
   result = frontend.searchPanel.focusQuery()
   if result:
     frontend.dockController.activatePanelWindow(frontend.window)
+
+proc toggleSidebarTab(frontend: KosmoApplication, index: int) =
+  if frontend.isNil or not frontend.hasFileBrowser():
+    return
+  if not frontend.splitView.isPaneCollapsed(0) and
+      frontend.sidebarTabs.selectedIndex == index:
+    frontend.splitView.setPaneCollapsed(0, true)
+    frontend.syncSidebarButtons()
+    let group = frontend.dockController.activePaneGroup()
+    if not group.isNil and group.window == frontend.window:
+      discard frontend.window.makeFirstResponder(group.preferredPaneResponder())
+  elif index == 0:
+    discard frontend.showFileExplorer()
+  else:
+    discard frontend.showFindInFiles()
 
 proc showQuickOpen*(frontend: KosmoApplication): bool {.discardable.} =
   ## Present the fuzzy project-file picker and open its selected file.
@@ -753,8 +779,9 @@ proc configureKosmoWorkspaceMenu(frontend: KosmoApplication) =
         discard active.showFileExplorer()
       of KosmoRevealActiveFileAction:
         discard active.revealActiveFile()
-      of KosmoFindInFilesAction:
-        discard active.showFindInFiles()
+      of KosmoFindInFilesAction, KosmoReplaceInFilesAction:
+        discard
+          active.showFindInFiles(replacing = identifier == KosmoReplaceInFilesAction)
       else:
         if identifier.startsWith(KosmoFocusPanelActionPrefix):
           discard
@@ -771,6 +798,7 @@ proc configureKosmoWorkspaceMenu(frontend: KosmoApplication) =
   addAction("Show Files", KosmoShowFileExplorerAction)
   addAction("Reveal Active File", KosmoRevealActiveFileAction)
   addAction("Find in Files", KosmoFindInFilesAction)
+  addAction("Replace in Files", KosmoReplaceInFilesAction)
 
   let
     focusMenu = nimkit.newMenu("Focus Panel")
@@ -837,8 +865,12 @@ proc newKosmoApplication*(
         absolutePath(filePath).parentDir()
       else:
         getCurrentDir()
-    editorView =
-      newKosmoEditorView(newKosmoEditor(workingDirectory = editorWorkingDirectory))
+    editorView = newKosmoEditorView(
+      newKosmoEditor(
+        workingDirectory = editorWorkingDirectory,
+        nimLspCommand = manager.config.nimLspCommand,
+      )
+    )
     editorPane = newKosmoEditorPane(editorView)
     fileTree = newKosmoFileTree(initialRootPath)
     fileBrowserPanel = newKosmoFileBrowserPanel(fileTree)
@@ -882,6 +914,7 @@ proc newKosmoApplication*(
       nimkit.newMenuItem("Close Tab", nimkit.actionSelector(KosmoCloseTabAction))
     closeWindowItem =
       nimkit.newMenuItem("Close Window", nimkit.actionSelector(KosmoCloseWindowAction))
+  sidebarTabs.tabBarHeight = 0.0'f32
   editorView.applyKosmoEditorStyle(app.effectiveAppearance())
   newItem.identifier = KosmoNewFileAction
   openItem.identifier = KosmoOpenFileAction
@@ -908,12 +941,15 @@ proc newKosmoApplication*(
   discard fileMenu.addItem(closeWindowItem)
 
   if hasFileBrowser:
-    splitView.addPane(sidebarPane, minSize = 160.0'f32, maxSize = 420.0'f32)
+    splitView.addPane(
+      sidebarPane, minSize = 160.0'f32, maxSize = 420.0'f32, collapsible = true
+    )
   splitView.addPane(dockView, minSize = 320.0'f32)
 
   let
     statusLabel = nimkit.newStatusLabel("Ready")
-    documentView = newKosmoContentView(splitView, statusLabel, quickOpenPanel)
+    documentView =
+      newKosmoContentView(splitView, statusLabel, quickOpenPanel, hasFileBrowser)
     contentView = nimkit.newMenuRootView(mainMenu, documentView)
   editorView.statusLabel = statusLabel
   editorView.syncChrome()
@@ -965,6 +1001,30 @@ proc newKosmoApplication*(
   controller.frontend = result.unsafeWeakRef()
   sidebarPane.dockController = controller.unsafeWeakRef()
   sidebarPane.observeWindow(result.window)
+  documentView.statusBar.observeWindow(result.window)
+  let weakFrontend = result.unsafeWeakRef()
+  if hasFileBrowser:
+    documentView.statusBar.fileButton.target = nimkit.newActionTarget(
+      nimkit.actionSelector("kosmo.toggleFilesSidebar"),
+      proc(sender: nimkit.DynamicAgent) =
+        discard sender
+        if not weakFrontend.isNil:
+          weakFrontend[].toggleSidebarTab(0)
+      ,
+    )
+    documentView.statusBar.fileButton.action =
+      nimkit.actionSelector("kosmo.toggleFilesSidebar")
+    documentView.statusBar.findButton.target = nimkit.newActionTarget(
+      nimkit.actionSelector("kosmo.toggleFindSidebar"),
+      proc(sender: nimkit.DynamicAgent) =
+        discard sender
+        if not weakFrontend.isNil:
+          weakFrontend[].toggleSidebarTab(1)
+      ,
+    )
+    documentView.statusBar.findButton.action =
+      nimkit.actionSelector("kosmo.toggleFindSidebar")
+  result.syncSidebarButtons()
   quickOpenPanel.observeWindow(result.window)
   documentView.onShowFileExplorer = proc() =
     if not controller.frontend.isNil:
@@ -972,9 +1032,9 @@ proc newKosmoApplication*(
   documentView.onRevealActiveFile = proc() =
     if not controller.frontend.isNil:
       discard controller.frontend[].revealActiveFile()
-  documentView.onFindInFiles = proc() =
+  documentView.onFindInFiles = proc(replacing: bool) =
     if not controller.frontend.isNil:
-      discard controller.frontend[].showFindInFiles()
+      discard controller.frontend[].showFindInFiles(replacing = replacing)
   documentView.onQuickOpen = proc() =
     if not controller.frontend.isNil:
       discard controller.frontend[].showQuickOpen()
@@ -1084,6 +1144,15 @@ proc newKosmoApplication*(
     let activeView = frontend[].dockController.activeEditorView()
     if not activeView.isNil:
       discard activeView.openSearchResult(match, disposition)
+  searchPanel.canReplaceFile = proc(path: string): bool =
+    if frontend.isNil:
+      return false
+    not frontend[].dockController.editor.hasUnsavedFileChanges(path)
+  searchPanel.onFileReplaced = proc(path: string) =
+    if not frontend.isNil:
+      frontend[].dockController.editor.reloadUnmodifiedFile(path)
+      for group in frontend[].dockController.groups:
+        group.editorView.refresh()
   if fileExists(filePath):
     discard result.dockController.activeEditorView().openFile(filePath)
   elif dirExists(filePath):
@@ -1407,6 +1476,8 @@ proc close*(frontend: KosmoApplication) =
         host.window.close()
   if not frontend.sidebarPane.isNil:
     frontend.sidebarPane.stopObservingWindow()
+  if not frontend.documentView.isNil:
+    frontend.documentView.statusBar.stopObservingWindow()
   if not frontend.quickOpenPanel.isNil:
     frontend.quickOpenPanel.stopObservingWindow()
   if not frontend.editorView.isNil:

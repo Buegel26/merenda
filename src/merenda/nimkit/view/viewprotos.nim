@@ -222,35 +222,35 @@ protocol ViewProtocol {.setterStyle: nim.} from View:
     self.setNeedsDisplaySubtree()
 
   method nextKeyView(self: View): View =
-    self.xNextKeyView
+    self.xNextKeyView.target
 
   method `nextKeyView=`(self: View, next: View) =
-    if self.xNextKeyView == next:
+    if self.nextKeyView() == next:
       return
 
-    let oldNext = self.xNextKeyView
-    if not oldNext.isNil and oldNext.xPreviousKeyView == self:
-      oldNext.xPreviousKeyView = nil
+    let oldNext = self.nextKeyView()
+    if not oldNext.isNil and oldNext.previousKeyView() == self:
+      oldNext.xPreviousKeyView.clear()
 
-    self.xNextKeyView = next
+    self.xNextKeyView.target = next
     if not next.isNil:
-      let oldPrevious = next.xPreviousKeyView
+      let oldPrevious = next.previousKeyView()
       if not oldPrevious.isNil and oldPrevious != self and
-          oldPrevious.xNextKeyView == next:
-        oldPrevious.xNextKeyView = nil
-      next.xPreviousKeyView = self
+          oldPrevious.nextKeyView() == next:
+        oldPrevious.xNextKeyView.clear()
+      next.xPreviousKeyView.target = self
 
   method previousKeyView(self: View): View =
-    self.xPreviousKeyView
+    self.xPreviousKeyView.target
 
   method `previousKeyView=`(self: View, previous: View) =
-    if self.xPreviousKeyView == previous:
+    if self.previousKeyView() == previous:
       return
     if previous.isNil:
-      let oldPrevious = self.xPreviousKeyView
-      if not oldPrevious.isNil and oldPrevious.xNextKeyView == self:
-        oldPrevious.xNextKeyView = nil
-      self.xPreviousKeyView = nil
+      let oldPrevious = self.previousKeyView()
+      if not oldPrevious.isNil and oldPrevious.nextKeyView() == self:
+        oldPrevious.xNextKeyView.clear()
+      self.xPreviousKeyView.clear()
       return
     previous.nextKeyView = self
 
@@ -340,7 +340,7 @@ protocol ViewProtocol {.setterStyle: nim.} from View:
       emit self.layoutInputChanged(lirSuperview)
       emit parent.layoutInputChanged(lirHierarchy)
       parent.propagateNeedsDisplayInRect(self.rectToView(self.bounds, parent))
-    self.xSuperview[] = nil
+    self.xSuperview.target = nil
     self.resetAutoresizingState()
     self.clearNextResponder()
     self.nextKeyView = nil
@@ -362,7 +362,7 @@ protocol ViewProtocol {.setterStyle: nim.} from View:
     emit child.viewWillMoveToSuperview(self)
     if oldWindow != window:
       child.propagateWillMoveToWindow(window)
-    child.xSuperview[] = self
+    child.xSuperview.target = self
     child.refreshAutoresizingReference()
     self.xSubviews.add child
     child.setNextResponder(self)
@@ -559,7 +559,7 @@ proc propagateDidMoveToWindow*(view: View) =
     child.propagateDidMoveToWindow()
 
 proc setWindowOwner*(view: View, window: Responder) =
-  view.xWindow[] = window
+  view.xWindow.target = window
   for child in view.xSubviews:
     child.setWindowOwner(window)
 
@@ -573,7 +573,7 @@ proc attachSubviewAt(view, child: View, index: Natural) =
   emit child.viewWillMoveToSuperview(view)
   if oldWindow != window:
     child.propagateWillMoveToWindow(window)
-  child.xSuperview[] = view
+  child.xSuperview.target = view
   child.refreshAutoresizingReference()
   view.xSubviews.insert(child, min(index, view.xSubviews.len))
   child.setNextResponder(view)

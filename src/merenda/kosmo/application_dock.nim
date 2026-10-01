@@ -103,6 +103,12 @@ proc activateGroup(controller: KosmoDockController, view: KosmoEditorView) =
       if not previous.isNil:
         previous.editorView.refresh()
     controller.activeGroup = group
+    if controller.editor.configViewerOpen():
+      let document = group.documentForIdentifier(group.selectedTabIdentifier)
+      if document.isNil:
+        discard controller.editor.focusTextWindow()
+      else:
+        document.activate(group.pane)
     let tabs = view.visibleTabs(view.editor.tabs())
     view.selectVisibleBuffer(tabs)
     discard view.syncSelectedEditorContent(tabs)
@@ -120,6 +126,8 @@ proc activatePaneTab(
   controller.activateGroup(group.editorView)
   var id: KosmoBufferId
   if identifier.parseTabIdentifier(id):
+    if controller.editor.configViewerOpen():
+      discard controller.editor.focusTextWindow()
     group.editorView.saveViewState()
     group.editorView.editor.dismissCompletionPopup()
     group.editorView.editor.dismissCommandLine()
@@ -135,6 +143,7 @@ proc activatePaneTab(
   let document = group.documentForIdentifier(identifier)
   if document.isNil:
     return
+  document.activate(group.pane)
   group.editorView.editor.dismissCompletionPopup()
   group.editorView.editor.dismissCommandLine()
   group.pane.setContentView(document.contentView)
@@ -312,9 +321,10 @@ proc finishTabClose(controller: KosmoDockController, view: KosmoEditorView) =
     controller.activatePaneTab(group, selectedItem.identifier())
     return
   if view.bufferIds.len == 0 and group.documents.len == 0:
-    view.adoptActiveBuffer()
+    discard view.adoptActiveBuffer()
   view.lastTabs.setLen(0)
   view.refresh()
+  discard group.window.makeFirstResponder(nimkit.Responder(group.pane.contentView))
 
 proc closeCurrentPaneTab(controller: KosmoDockController, group: KosmoEditorGroup) =
   if controller.isNil or group.isNil:
@@ -578,19 +588,92 @@ proc splitCurrentBuffer(
   controller.activatePaneTab(target, id.tabIdentifier)
   true
 
-proc splitNewBufferBelow(
-    controller: KosmoDockController, source: KosmoEditorGroup
+proc splitNewBuffer(
+    controller: KosmoDockController,
+    source: KosmoEditorGroup,
+    position: nimkit.DockPosition,
 ): bool =
   let bufferId = controller.editor.newEmptyBuffer()
   if bufferId.isNone:
     return
   let target =
     controller.newEditorGroup(source.workspace, source.window, [bufferId.get])
-  if not source.workspace.splitPanel(source.panel, target.panel, nimkit.dpBottom):
+  if not source.workspace.splitPanel(source.panel, target.panel, position):
     controller.removeGroup(target)
     return
   controller.activatePaneTab(target, bufferId.get.tabIdentifier)
   true
+
+proc splitFileBuffer(
+    controller: KosmoDockController,
+    source: KosmoEditorGroup,
+    filename: string,
+    position: nimkit.DockPosition,
+): bool =
+  let
+    editor = controller.editor
+    sourceState = editor.captureViewState()
+    path = resolvedEditorFilePath(expandTilde(filename), editor.workingDirectory())
+    outcome = editor.openFile(path, reusePristineBuffer = false)
+  if not outcome.loaded:
+    if not source.editorView.statusLabel.isNil:
+      source.editorView.statusLabel.text = outcome.message
+    return
+  var openedId: Option[KosmoBufferId]
+  for tab in editor.tabs():
+    if tab.active:
+      openedId = some(tab.id)
+  discard editor.restoreViewState(sourceState)
+  if openedId.isNone:
+    return
+  let target =
+    controller.newEditorGroup(source.workspace, source.window, [openedId.get])
+  if not source.workspace.splitPanel(source.panel, target.panel, position):
+    controller.removeGroup(target)
+    return
+  controller.activatePaneTab(target, openedId.get.tabIdentifier)
+  true
+
+proc handleHostCommand(view: KosmoEditorView, command: KosmoHostCommand): bool =
+  if view.isNil or view.dockGroup.isNil or view.tabsDelegate.dockController.isNil:
+    return
+  let controller = view.tabsDelegate.dockController[]
+  let source = controller.activeGroup
+  if source.isNil:
+    return
+  case command.kind
+  of KosmoHostCommandKind.Help:
+    discard controller.editor.focusTextWindow()
+    return source.editorView.openHelpDocument()
+  of KosmoHostCommandKind.Config:
+    return source.editorView.openConfigDocument()
+  of KosmoHostCommandKind.CloseTab:
+    var id: KosmoBufferId
+    if command.forceClose and source.selectedTabIdentifier.parseTabIdentifier(id) and
+        not controller.bufferIsVisibleOutside(source, id):
+      let outcome = source.editorView.closeTab(id, discardChanges = true)
+      if outcome.closed:
+        discard
+          source.pane.documentTabs.removeDocumentTabWithIdentifier(id.tabIdentifier)
+        controller.finishTabClose(source.editorView)
+        return true
+    controller.closeCurrentPaneTab(source)
+    return true
+  of KosmoHostCommandKind.Pane:
+    return controller.performPaneCommand(source, command.paneCommand)
+  of KosmoHostCommandKind.SplitBelow, KosmoHostCommandKind.SplitRight,
+      KosmoHostCommandKind.NewBelow, KosmoHostCommandKind.NewRight:
+    let position =
+      if command.kind in {
+        KosmoHostCommandKind.SplitBelow, KosmoHostCommandKind.NewBelow
+      }: nimkit.dpBottom else: nimkit.dpRight
+    if command.kind in {KosmoHostCommandKind.NewBelow, KosmoHostCommandKind.NewRight}:
+      discard controller.editor.focusTextWindow()
+      return controller.splitNewBuffer(source, position)
+    if command.filename.isSome:
+      discard controller.editor.focusTextWindow()
+      return controller.splitFileBuffer(source, command.filename.get, position)
+    return controller.splitCurrentBuffer(source, position)
 
 proc preferredPaneResponder(group: KosmoEditorGroup): nimkit.Responder =
   let document = group.documentForIdentifier(group.selectedTabIdentifier)
@@ -609,7 +692,9 @@ proc focusGroup(controller: KosmoDockController, group: KosmoEditorGroup): bool 
   result = group.window.makeFirstResponder(group.preferredPaneResponder())
   group.editorView.refresh()
 
-proc focusNextGroup(controller: KosmoDockController, source: KosmoEditorGroup): bool =
+proc focusNextGroup(
+    controller: KosmoDockController, source: KosmoEditorGroup, offset = 1
+): bool =
   var candidates: seq[KosmoEditorGroup]
   for group in controller.groups:
     if group.workspace == source.workspace:
@@ -617,7 +702,9 @@ proc focusNextGroup(controller: KosmoDockController, source: KosmoEditorGroup): 
   let index = candidates.find(source)
   if candidates.len < 2 or index < 0:
     return
-  controller.focusGroup(candidates[(index + 1) mod candidates.len])
+  controller.focusGroup(
+    candidates[(index + offset + candidates.len) mod candidates.len]
+  )
 
 proc focusSpatialGroup(
     controller: KosmoDockController,
@@ -739,9 +826,11 @@ proc performPaneCommand(
   of kpcSplitRight:
     controller.splitCurrentBuffer(source, nimkit.dpRight)
   of kpcNewBelow:
-    controller.splitNewBufferBelow(source)
+    controller.splitNewBuffer(source, nimkit.dpBottom)
   of kpcFocusNext:
     controller.focusNextGroup(source)
+  of kpcFocusPrevious:
+    controller.focusNextGroup(source, -1)
   of kpcFocusLeft, kpcFocusBelow, kpcFocusAbove, kpcFocusRight:
     controller.focusSpatialGroup(source, command)
   of kpcClose:
@@ -807,7 +896,7 @@ proc updateDockTarget(
 protocol KosmoDetachedContentLayout of nimkit.ViewLayoutProtocol:
   method layoutSubviews(content: KosmoDetachedContentView) =
     let bounds = content.bounds()
-    content.statusLabel.setFrameFromLayout(
+    content.statusBar.setFrameFromLayout(
       nimkit.rect(
         0,
         max(bounds.size.height - KosmoStatusBarHeight, 0.0'f32),
@@ -824,10 +913,14 @@ protocol KosmoDetachedContentLayout of nimkit.ViewLayoutProtocol:
 proc newKosmoDetachedContentView(
     workspace: nimkit.DockView, statusLabel: nimkit.Label
 ): KosmoDetachedContentView =
-  result = KosmoDetachedContentView(workspace: workspace, statusLabel: statusLabel)
+  result = KosmoDetachedContentView(
+    workspace: workspace,
+    statusBar: newKosmoStatusBar(statusLabel, withSidebarButtons = false),
+    statusLabel: statusLabel,
+  )
   result.initViewFields()
   result.addSubview(workspace)
-  result.addSubview(statusLabel)
+  result.addSubview(result.statusBar)
   discard result.withProtocol(KosmoDetachedContentLayout)
 
 protocol KosmoDetachedWindowLifecycleDelegate of nimkit.WindowDelegateProtocol:
@@ -837,6 +930,9 @@ protocol KosmoDetachedWindowLifecycleDelegate of nimkit.WindowDelegateProtocol:
     if lifecycle.controller.isNil:
       return
     let controller = lifecycle.controller[]
+    for host in controller.hosts:
+      if host.window == window and host.contentView of KosmoDetachedContentView:
+        KosmoDetachedContentView(host.contentView).statusBar.stopObservingWindow()
     var hostedGroups: seq[KosmoEditorGroup]
     for group in controller.groups:
       if group.window == window:
@@ -877,6 +973,7 @@ proc detachPaneTab(
     lifecycle = KosmoDetachedWindowLifecycle(controller: controller.unsafeWeakRef())
   lifecycle.initResponder()
   discard lifecycle.withProtocol(KosmoDetachedWindowLifecycleDelegate)
+  contentView.statusBar.observeWindow(window)
   window.delegate = lifecycle
   controller.hosts.add host
   controller.installShortcutBindings(window)
@@ -942,6 +1039,7 @@ proc openPaneDocument(
     group: KosmoEditorGroup,
     document: KosmoPaneDocument,
     insertAfterSelected = false,
+    preserveVisibleTabs = false,
 ): bool =
   if controller.isNil or group.isNil or document.isNil or document.identifier.len == 0 or
       document.contentView.isNil:
@@ -969,7 +1067,8 @@ proc openPaneDocument(
       group.tabOrder.len,
   )
   group.selectedTabIdentifier = document.identifier
-  group.editorView.lastTabs.setLen(0)
+  if not preserveVisibleTabs:
+    group.editorView.lastTabs.setLen(0)
   group.editorView.refresh()
   controller.activatePaneTab(group, document.identifier)
   true
@@ -997,8 +1096,12 @@ proc pollWorkspaceGit(lifecycle: KosmoWindowLifecycle) {.slot.} =
       discard frontend.gitDiffPanel.pollRepositoryRefresh()
     frontend.fileTree.workspaceFiles.setGitRoots(controller.editor.gitWatchRoots())
     if controller.editor.pollGitStatus():
-      for group in controller.groups:
-        group.editorView.refresh()
+      let groups = controller.groups
+      if not controller.activeGroup.isNil:
+        controller.activeGroup.editorView.refresh()
+      for group in groups:
+        if group != controller.activeGroup:
+          group.editorView.refresh()
 
 proc setTerminalEnvironment(
     options: var nimkit.TerminexSpawnOptions, name, value: string
@@ -1119,7 +1222,7 @@ proc presentTerminalError(
   discard alert.contentView()
   discard app.beginModalSession(alert.window)
   var weakWindow: nimkit.BackRef[nimkit.Window]
-  weakWindow[] = alert.window
+  weakWindow.target = alert.window
   # The application owns the modal window. Button callbacks must not retain the
   # Alert/content tree or the application through a reference cycle.
   for view in alert.buttonViews:
@@ -1127,7 +1230,7 @@ proc presentTerminalError(
     button.target = nimkit.newActionTarget(button.action) do(sender: DynamicAgent):
       discard sender
       if not weakWindow.isNil:
-        weakWindow[].close()
+        weakWindow.target.close()
 
 proc openTerminal(
     controller: KosmoDockController,
@@ -1183,7 +1286,7 @@ protocol KosmoContentLayout of nimkit.ViewLayoutProtocol:
       splitWidthChanged =
         content.setInitialDivider and
         abs(bounds.size.width - content.lastSplitWidth) > 0.001'f32
-    content.statusLabel.setFrameFromLayout(
+    content.statusBar.setFrameFromLayout(
       nimkit.rect(
         0,
         max(bounds.size.height - KosmoStatusBarHeight, 0.0'f32),
@@ -1217,8 +1320,9 @@ protocol KosmoContentLayout of nimkit.ViewLayoutProtocol:
     if not content.setInitialDivider and bounds.size.width > 0.0'f32:
       content.splitView.setPositionOfDivider(0, min(bounds.size.width * 0.25, 260.0))
       content.setInitialDivider = true
-    elif splitWidthChanged:
+    elif splitWidthChanged and not content.splitView.isPaneCollapsed(0):
       content.splitView.setPositionOfDivider(0, content.fileTreeWidth)
     content.lastSplitWidth = bounds.size.width
-    if content.splitView.paneCount() > 1 and not splitWidthChanged:
+    if content.splitView.paneCount() > 1 and not content.splitView.isPaneCollapsed(0) and
+        not splitWidthChanged:
       content.fileTreeWidth = content.splitView.positionOfDivider(0)

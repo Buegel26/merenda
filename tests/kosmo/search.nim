@@ -1,5 +1,4 @@
-import
-  std/[monotimes, options, os, osproc, strutils, tempfiles, times, unicode, unittest]
+import std/[monotimes, options, os, strutils, tempfiles, times, unicode, unittest]
 
 import figdraw
 import sigils/threads
@@ -7,9 +6,8 @@ import sigils/threads
 import merenda/nimkit
 import merenda/nimkit/text/monotextviews as monoTextViews
 import merenda/kosmo/kosmo
-
-const MerendaNimbleManifest =
-  staticRead(currentSourcePath().parentDir / "../../merenda.nimble")
+import fixtures/ui
+import ../nimkit/fixtures/rendergeometry
 
 proc renderedFigText(node: Fig): string =
   for glyphIndex in 0 ..< node.textLayout.glyphCount():
@@ -33,433 +31,6 @@ proc hasSidebarPaneOutline(
       return true
 
 suite "Kosmo":
-  test "frontend installs Kosmo settings with terminal Meta enabled by default":
-    let app = newApplication("Kosmo Test")
-    let frontend = newKosmoApplication(app)
-    defer:
-      frontend.close()
-    let
-      mainMenu = app.mainMenu()
-      applicationMenu = mainMenu[0].submenu()
-      fileMenu = mainMenu[1].submenu()
-      windowMenu = mainMenu[3].submenu()
-      aboutItem = applicationMenu[0]
-      aboutInfo = app.aboutInfo()
-      settingsItem = applicationMenu[2]
-    let newItem = fileMenu.menuItemWithIdentifier(KosmoNewFileAction)
-    let openItem = fileMenu.menuItemWithIdentifier(KosmoOpenFileAction)
-    let openProjectItem = fileMenu.menuItemWithIdentifier(KosmoOpenProjectAction)
-    let terminalItem = fileMenu.menuItemWithIdentifier(KosmoNewTerminalAction)
-
-    check mainMenu.len == 5
-    check mainMenu[0].title == "Kosmo Test"
-    check mainMenu[1].title == "File"
-    check mainMenu[2].title == "Edit"
-    check mainMenu[3].title == "Window"
-    check mainMenu[4].title == "Help"
-    check aboutItem.title == "About Kosmo Test"
-    check not app.icon().isNil
-    check aboutInfo.version == KosmoVersion
-    check ("version       = \"" & aboutInfo.version & "\"") in MerendaNimbleManifest
-    check aboutInfo.buildVersion == KosmoGitHash
-    check "Moe" in aboutInfo.credits
-    check KosmoMoeUrl in aboutInfo.credits
-    check aboutInfo.creditLinks ==
-      @[ApplicationAboutLink(text: KosmoMoeUrl, url: KosmoMoeUrl)]
-    check "GPL-3.0" in aboutInfo.credits
-    check settingsItem.title == "Settings…"
-    check settingsItem.action().name == actionSelector(KosmoShowSettingsAction).name
-    var includesMerendaSettings = false
-    for item in windowMenu.items():
-      if item.action().name == actionSelector("showMerendaSettings").name:
-        includesMerendaSettings = true
-    check includesMerendaSettings
-    check not newItem.isNil
-    check newItem.title == "New…"
-    check not openItem.isNil
-    check openItem.title == "Open…"
-    check not openProjectItem.isNil
-    check openProjectItem.title == "Open Project…"
-    check not terminalItem.isNil
-    check terminalItem.title == "New Terminal"
-    frontend.contentView.frame = rect(0, 0, 640, 480)
-    frontend.contentView.layoutSubtreeIfNeeded()
-    check frontend.contentView.menuBar().hidden() == app.usesNativeMainMenu()
-    if app.usesNativeMainMenu():
-      check frontend.contentView.contentView().frame().origin.y == 0.0'f32
-    check frontend.splitView.panes() ==
-      @[View(frontend.sidebarPane), View(frontend.dockView)]
-    check frontend.sidebarTabs.len == 2
-    check frontend.sidebarTabs[0].identifier == KosmoFilesTabIdentifier
-    check frontend.sidebarTabs[1].identifier == KosmoFindTabIdentifier
-
-    app.addWindow(frontend.window)
-    check settingsItem.perform(Responder(frontend.editorView))
-    check app.windows.len == 2
-    let settingsPanel = app.windows[^1]
-    check settingsPanel.title == "Kosmo Settings"
-    check settingsPanel.contentView().viewWithIdentifier("settings-theme-picker").isNil
-    let tabsView =
-      settingsPanel.contentView().viewWithIdentifier(KosmoSettingsTabsIdentifier)
-    require not tabsView.isNil
-    require tabsView of TabView
-    let settingsTabs = TabView(tabsView)
-    check settingsTabs.len == 4
-    check settingsTabs[0].label == "Terminal"
-    check settingsTabs[0].identifier == KosmoTerminalSettingsTabIdentifier
-    check settingsTabs[1].label == "Shortcuts"
-    check settingsTabs[1].identifier == KosmoShortcutsSettingsTabIdentifier
-    check settingsTabs[2].label == "Moe Themes"
-    check settingsTabs[2].identifier == KosmoMoeThemesSettingsTabIdentifier
-    check settingsTabs[3].label == "TextMate Grammars"
-    check settingsTabs[3].identifier == KosmoTextMateGrammarsSettingsTabIdentifier
-    check settingsTabs.selectedIndex == 0
-
-    discard settingsPanel.buildRenders()
-    check settingsPanel.contentView().frame.size.width > 0.0'f32
-    check settingsPanel.contentView().frame.size.height > 0.0'f32
-    require settingsPanel.contentView().subviews().len == 1
-    let settingsLayout = settingsPanel.contentView().subviews()[0]
-    check settingsLayout.frame.size.width > 0.0'f32
-    check settingsLayout.frame.size.height > 0.0'f32
-    check settingsTabs.frame.size.width > 0.0'f32
-    check settingsTabs.frame.size.height > 0.0'f32
-    let moeThemesTabRect = settingsTabs.tabRect(2)
-    let moeThemesTabPoint = settingsTabs.pointToWindow(
-      initPoint(
-        moeThemesTabRect.origin.x + moeThemesTabRect.size.width * 0.5'f32,
-        moeThemesTabRect.origin.y + moeThemesTabRect.size.height * 0.5'f32,
-      )
-    )
-    check settingsPanel.mouseDownAt(moeThemesTabPoint)
-    check settingsPanel.mouseUpAt(moeThemesTabPoint)
-    check settingsTabs.selectedIndex == 2
-    discard settingsPanel.buildRenders()
-    let initialMoeThemeView =
-      settingsPanel.contentView().viewWithIdentifier(KosmoMoeThemesTableIdentifier)
-    require not initialMoeThemeView.isNil
-    check initialMoeThemeView.frame.size.width > 0.0'f32
-    check initialMoeThemeView.frame.size.height > 0.0'f32
-
-    check settingsTabs.selectTabViewItemAtIndex(1)
-    discard settingsPanel.buildRenders()
-
-    let
-      shortcutProfileView =
-        settingsPanel.contentView().viewWithIdentifier(KosmoShortcutProfileIdentifier)
-      editorInputPolicyView =
-        settingsPanel.contentView().viewWithIdentifier(KosmoEditorInputPolicyIdentifier)
-      forceInputModeView =
-        settingsPanel.contentView().viewWithIdentifier(KosmoForceInputModeIdentifier)
-    require not shortcutProfileView.isNil
-    require shortcutProfileView of ComboBox
-    require not editorInputPolicyView.isNil
-    require editorInputPolicyView of ComboBox
-    require not forceInputModeView.isNil
-    require forceInputModeView of Button
-    let
-      shortcutProfileChoice = ComboBox(shortcutProfileView)
-      editorInputPolicyChoice = ComboBox(editorInputPolicyView)
-      forceInputModeButton = Button(forceInputModeView)
-    check shortcutProfileChoice.selectedIndex ==
-      (if frontend.shortcutProfile() == KosmoShortcutProfile.MacOS: 1 else: 0)
-    check editorInputPolicyChoice.selectedIndex == 2
-    check frontend.editorInputPolicy() == KosmoEditorInputPolicy.Hybrid
-    check not frontend.forceInputMode()
-    check not frontend.settingsWindow().forceInputMode
-    check forceInputModeButton.state == bsOff
-
-    shortcutProfileChoice.activateItemAtIndex(1)
-    check frontend.shortcutProfile() == KosmoShortcutProfile.MacOS
-    check frontend.settingsWindow().shortcutProfile == KosmoShortcutProfile.MacOS
-    shortcutProfileChoice.activateItemAtIndex(0)
-    check frontend.shortcutProfile() == KosmoShortcutProfile.Platform
-    check frontend.settingsWindow().shortcutProfile == KosmoShortcutProfile.Platform
-
-    editorInputPolicyChoice.activateItemAtIndex(0)
-    check frontend.editorInputPolicy() == KosmoEditorInputPolicy.Vim
-    check frontend.settingsWindow().editorInputPolicy == KosmoEditorInputPolicy.Vim
-    editorInputPolicyChoice.activateItemAtIndex(1)
-    check frontend.editorInputPolicy() == KosmoEditorInputPolicy.Native
-    check frontend.settingsWindow().editorInputPolicy == KosmoEditorInputPolicy.Native
-    editorInputPolicyChoice.activateItemAtIndex(2)
-    check frontend.editorInputPolicy() == KosmoEditorInputPolicy.Hybrid
-    check frontend.settingsWindow().editorInputPolicy == KosmoEditorInputPolicy.Hybrid
-
-    check forceInputModeButton.tryToPerform(
-      performClick(), DynamicAgent(forceInputModeButton)
-    )
-    check forceInputModeButton.state == bsOn
-    check frontend.forceInputMode()
-    check frontend.settingsWindow().forceInputMode
-    check frontend.editorView.editor.mode() == KosmoEditorMode.Insert
-    check forceInputModeButton.tryToPerform(
-      performClick(), DynamicAgent(forceInputModeButton)
-    )
-    check forceInputModeButton.state == bsOff
-    check not frontend.forceInputMode()
-
-    let shortcutsView =
-      settingsPanel.contentView().viewWithIdentifier(KosmoShortcutsTableIdentifier)
-    require not shortcutsView.isNil
-    require shortcutsView of TableView
-    let
-      shortcutsTable = TableView(shortcutsView)
-      actionColumn =
-        shortcutsTable.columnWithIdentifier(KosmoShortcutActionColumnIdentifier)
-      descriptionColumn =
-        shortcutsTable.columnWithIdentifier(KosmoShortcutDescriptionColumnIdentifier)
-      keysColumn =
-        shortcutsTable.columnWithIdentifier(KosmoShortcutKeysColumnIdentifier)
-    check shortcutsTable.columnCount == 3
-    require not actionColumn.isNil
-    require not descriptionColumn.isNil
-    require not keysColumn.isNil
-    check actionColumn.title == "Action"
-    check descriptionColumn.title == "Description"
-    check keysColumn.title == "Shortcut Keys"
-    check actionColumn.sizingPolicy == tcspFixed
-    check descriptionColumn.sizingPolicy == tcspFlexible
-    check keysColumn.sizingPolicy == tcspFixed
-    check shortcutsTable.columnSizing == tvcsFill
-    check shortcutsTable.rowCount == kosmoActions().len
-    check shortcutsTable.selectionMode == tsmNone
-    let
-      initialShortcutsWidth = shortcutsTable.frame.size.width
-      initialDescriptionWidth = descriptionColumn.width
-      initialContentWidth = settingsPanel.contentView().frame.size.width
-      initialLayoutWidth = settingsLayout.frame.size.width
-      initialTabsWidth = settingsTabs.frame.size.width
-      initialPageWidth = shortcutsTable.superview.bounds.size.width
-      initialSettingsFrame = settingsPanel.frame
-    settingsPanel.frame = rect(
-      initialSettingsFrame.origin,
-      initSize(
-        initialSettingsFrame.size.width + 240.0'f32,
-        initialSettingsFrame.size.height + 120.0'f32,
-      ),
-    )
-    settingsPanel.contentView().layoutSubtreeIfNeeded()
-    discard settingsPanel.buildRenders()
-    check settingsPanel.contentView().frame.size.width > initialContentWidth + 200.0'f32
-    check settingsLayout.frame.size.width > initialLayoutWidth + 200.0'f32
-    check settingsTabs.frame.size.width > initialTabsWidth + 200.0'f32
-    check shortcutsTable.superview.bounds.size.width > initialPageWidth + 200.0'f32
-    check shortcutsTable.frame.size.width > initialShortcutsWidth + 200.0'f32
-    check descriptionColumn.width > initialDescriptionWidth + 200.0'f32
-    require shortcutsTable.superview of StackView
-    let shortcutsPageStack = StackView(shortcutsTable.superview)
-    check abs(
-      shortcutsTable.frame.size.width - (
-        shortcutsPageStack.bounds.size.width - shortcutsPageStack.edgeInsets.left -
-        shortcutsPageStack.edgeInsets.right
-      )
-    ) < 1.0'f32
-    check abs(
-      actionColumn.width + descriptionColumn.width + keysColumn.width -
-        shortcutsTable.scrollView.viewportSize.width
-    ) < 1.0'f32
-
-    var
-      saveRow = -1
-      horizontalSplitRow = -1
-      verticalSplitRow = -1
-    for row in 0 ..< shortcutsTable.rowCount:
-      let action = shortcutsTable.tableCellText(row, actionColumn)
-      check shortcutsTable.tableCellText(row, descriptionColumn).len > 0
-      check shortcutsTable.tableCellText(row, keysColumn).len > 0
-      case action
-      of KosmoSaveAction:
-        saveRow = row
-      of KosmoSplitHorizontalAction:
-        horizontalSplitRow = row
-      of KosmoSplitVerticalAction:
-        verticalSplitRow = row
-      else:
-        discard
-    require saveRow >= 0
-    require horizontalSplitRow >= 0
-    require verticalSplitRow >= 0
-    when defined(macosx) or defined(macos):
-      check shortcutsTable.tableCellText(saveRow, keysColumn) == "Cmd+S"
-    else:
-      check shortcutsTable.tableCellText(saveRow, keysColumn) == "Ctrl+S"
-    check shortcutsTable.tableCellText(horizontalSplitRow, keysColumn) ==
-      "Ctrl+W S / Ctrl+W Ctrl+S"
-    check shortcutsTable.tableCellText(verticalSplitRow, keysColumn) ==
-      "Ctrl+W V / Ctrl+W Ctrl+V"
-    check not shortcutsTable.beginEditingCell(saveRow, keysColumn)
-    check settingsTabs.selectTabViewItemAtIndex(2)
-
-    let moeThemeView =
-      settingsPanel.contentView().viewWithIdentifier(KosmoMoeThemesTableIdentifier)
-    require not moeThemeView.isNil
-    require moeThemeView of TableView
-    let
-      moeThemesTable = TableView(moeThemeView)
-      themeColumn =
-        moeThemesTable.columnWithIdentifier(KosmoMoeThemeNameColumnIdentifier)
-      previewColumn =
-        moeThemesTable.columnWithIdentifier(KosmoMoeThemePreviewColumnIdentifier)
-    check moeThemesTable.columnCount == 2
-    check moeThemesTable.selectionMode == tsmSingle
-    require not themeColumn.isNil
-    require not previewColumn.isNil
-    check themeColumn.title == "Theme"
-    check previewColumn.title == "Colors"
-    check moeThemesTable.rowCount >= 2
-    let defaultThemeRow =
-      moeThemesTable.tableRowIndexForIdentifier(KosmoMoeDefaultThemeIdentifier)
-    require defaultThemeRow >= 0
-    var catppuccinRow = -1
-    for expectedName in [
-      "Catppuccin Latte", "Catppuccin Mocha", "Kanagawa Wave", "One Dark",
-      "Tokyo Night Moon",
-    ]:
-      var matchingRow = -1
-      for row in 0 ..< moeThemesTable.rowCount:
-        if moeThemesTable.tableCellText(row, themeColumn) == expectedName:
-          matchingRow = row
-          break
-      check matchingRow >= 0
-      if expectedName == "Catppuccin Mocha":
-        catppuccinRow = matchingRow
-    require catppuccinRow >= 0
-    check moeThemesTable.tableCellText(catppuccinRow, previewColumn) ==
-      KosmoMoeThemePreviewText
-    check KosmoMoeThemePreviewText.len <= 20
-    let previewView = moeThemesTable.tableCellView(catppuccinRow, previewColumn)
-    require not previewView.isNil
-    check previewView.accessibilityLabel == KosmoMoeThemePreviewText
-    previewView.frame = rect(0, 0, previewColumn.width, moeThemesTable.rowHeight)
-    let previewRenders = previewView.buildRenders()[DefaultDrawLevel]
-    var
-      hasPreviewBackground = false
-      renderedPreview = ""
-    for node in previewRenders.nodes:
-      if node.kind == nkRectangle:
-        hasPreviewBackground = true
-      elif node.kind == nkText:
-        renderedPreview.add node.renderedFigText()
-    check hasPreviewBackground
-    check renderedPreview == KosmoMoeThemePreviewText
-    check moeThemesTable.tableRowIdentifier(moeThemesTable.selectedIndex) ==
-      frontend.editorView.editor.activeMoeThemeIdentifier()
-    discard settingsPanel.buildRenders()
-    let catppuccinRect = moeThemesTable.rowItemRect(catppuccinRow)
-    let catppuccinPoint = moeThemesTable.pointToWindow(
-      initPoint(
-        catppuccinRect.origin.x + catppuccinRect.size.width * 0.5'f32,
-        catppuccinRect.origin.y + catppuccinRect.size.height * 0.5'f32,
-      )
-    )
-    check settingsPanel.mouseDownAt(catppuccinPoint)
-    check settingsPanel.mouseUpAt(catppuccinPoint)
-    check frontend.editorView.editor.activeMoeThemeIdentifier() ==
-      moeThemesTable.tableRowIdentifier(catppuccinRow)
-    check frontend.settingsWindow().selectedMoeThemeIdentifier() ==
-      moeThemesTable.tableRowIdentifier(catppuccinRow)
-    let defaultThemeRect = moeThemesTable.rowItemRect(defaultThemeRow)
-    let defaultThemePoint = moeThemesTable.pointToWindow(
-      initPoint(
-        defaultThemeRect.origin.x + defaultThemeRect.size.width * 0.5'f32,
-        defaultThemeRect.origin.y + defaultThemeRect.size.height * 0.5'f32,
-      )
-    )
-    check settingsPanel.mouseDownAt(defaultThemePoint)
-    check settingsPanel.mouseUpAt(defaultThemePoint)
-    check frontend.editorView.editor.activeMoeThemeIdentifier() ==
-      KosmoMoeDefaultThemeIdentifier
-    check frontend.settingsWindow().selectedMoeThemeIdentifier() ==
-      KosmoMoeDefaultThemeIdentifier
-    check settingsTabs.selectTabViewItemAtIndex(3)
-    discard settingsPanel.buildRenders()
-
-    let textMateGrammarsView = settingsPanel.contentView().viewWithIdentifier(
-        KosmoTextMateGrammarsTableIdentifier
-      )
-    require not textMateGrammarsView.isNil
-    require textMateGrammarsView of TableView
-    let
-      textMateGrammarsTable = TableView(textMateGrammarsView)
-      grammarColumn = textMateGrammarsTable.columnWithIdentifier(
-        KosmoTextMateGrammarNameColumnIdentifier
-      )
-      scopeColumn = textMateGrammarsTable.columnWithIdentifier(
-        KosmoTextMateGrammarScopeColumnIdentifier
-      )
-      originColumn = textMateGrammarsTable.columnWithIdentifier(
-        KosmoTextMateGrammarOriginColumnIdentifier
-      )
-      availableGrammars = frontend.editorView.editor.availableTextMateGrammars()
-    check textMateGrammarsTable.columnCount == 3
-    check textMateGrammarsTable.selectionMode == tsmNone
-    check textMateGrammarsTable.rowCount == availableGrammars.len
-    require not grammarColumn.isNil
-    require not scopeColumn.isNil
-    require not originColumn.isNil
-    check grammarColumn.title == "Grammar"
-    check scopeColumn.title == "Scope"
-    check originColumn.title == "Origin"
-    var foundTerraform = false
-    for row in 0 ..< textMateGrammarsTable.rowCount:
-      check textMateGrammarsTable.tableCellText(row, grammarColumn).len > 0
-      check textMateGrammarsTable.tableCellText(row, scopeColumn).len > 0
-      check textMateGrammarsTable.tableCellText(row, originColumn) ==
-        availableGrammars[row].origin.title()
-      if textMateGrammarsTable.tableCellText(row, scopeColumn) == "source.hcl.terraform":
-        check textMateGrammarsTable.tableCellText(row, grammarColumn) == "Terraform"
-        foundTerraform = true
-    check foundTerraform
-
-    var grammarsWithAddition = availableGrammars
-    grammarsWithAddition.add KosmoTextMateGrammar(
-      name: "Example Added Grammar",
-      scopeName: "source.example-added",
-      origin: KosmoTextMateGrammarOrigin.Added,
-    )
-    frontend.settingsWindow().textMateGrammars = grammarsWithAddition
-    check textMateGrammarsTable.rowCount == availableGrammars.len + 1
-    check textMateGrammarsTable.tableCellText(
-      textMateGrammarsTable.rowCount - 1, originColumn
-    ) == "Added"
-    check settingsTabs.selectTabViewItemAtIndex(0)
-
-    let optionView =
-      settingsPanel.contentView().viewWithIdentifier(KosmoOptionAsMetaIdentifier)
-    require not optionView.isNil
-    require optionView of Button
-    let
-      optionButton = Button(optionView)
-      terminalLinksView =
-        settingsPanel.contentView().viewWithIdentifier(KosmoTerminalLinksIdentifier)
-    require not terminalLinksView.isNil
-    require terminalLinksView of Button
-    let terminalLinksButton = Button(terminalLinksView)
-    check frontend.terminalOptionAsMeta
-    check optionButton.state == bsOn
-    check frontend.terminalLinksEnabled
-    check terminalLinksButton.state == bsOn
-
-    let terminalView = newTerminalView()
-    check frontend.openDocument(
-      newKosmoPaneDocument("kosmo.test.terminal", "Terminal", terminalView)
-    )
-    check terminalView.optionAsMeta
-    check terminalView.allowsLinkActivation
-    check optionButton.tryToPerform(performClick(), DynamicAgent(optionButton))
-    check optionButton.state == bsOff
-    check not frontend.terminalOptionAsMeta
-    check not terminalView.optionAsMeta
-    check terminalLinksButton.tryToPerform(
-      performClick(), DynamicAgent(terminalLinksButton)
-    )
-    check terminalLinksButton.state == bsOff
-    check not frontend.terminalLinksEnabled
-    check not terminalView.allowsLinkActivation
-    settingsPanel.close()
-    frontend.window.close()
-
   test "sidebar focus highlights file and search panes with the pane accent outline":
     let frontend = newKosmoApplication(newApplication("Kosmo Sidebar Focus Test"))
     defer:
@@ -514,7 +85,6 @@ suite "Kosmo":
     check frontend.fileTree.showsFocusedRowHighlight
     check frontend.searchPanel.resultsView.showsFocusedRowHighlight
     check frontend.sidebarPane.hasSidebarPaneOutline(paneOutlineColor, paneOutlineWidth)
-    check frontend.editorPane.documentTabs.hasStyleClass(KosmoInactivePaneStyleClass)
 
     check frontend.window.makeFirstResponder(frontend.editorView)
     check not frontend.sidebarTabs.focused
@@ -522,9 +92,6 @@ suite "Kosmo":
     check not frontend.searchPanel.resultsView.showsFocusedRowHighlight
     check not frontend.sidebarPane.hasSidebarPaneOutline(
       paneOutlineColor, paneOutlineWidth
-    )
-    check not frontend.editorPane.documentTabs.hasStyleClass(
-      KosmoInactivePaneStyleClass
     )
 
     check frontend.showFindInFiles()
@@ -534,7 +101,6 @@ suite "Kosmo":
     check frontend.fileTree.showsFocusedRowHighlight
     check frontend.searchPanel.resultsView.showsFocusedRowHighlight
     check frontend.sidebarPane.hasSidebarPaneOutline(paneOutlineColor, paneOutlineWidth)
-    check frontend.editorPane.documentTabs.hasStyleClass(KosmoInactivePaneStyleClass)
 
     check frontend.window.makeFirstResponder(frontend.searchPanel.resultsView)
     check frontend.sidebarPane.hasSidebarPaneOutline(paneOutlineColor, paneOutlineWidth)
@@ -571,20 +137,14 @@ suite "Kosmo":
     check frontend.sidebarTabs.selectedIndex == 0
     check not frontend.fileTree.isHiddenOrHasHiddenAncestor()
     check frontend.searchPanel.hidden
-    let findTabPoint = frontend.sidebarTabs.pointToWindow(
-      initPoint(
-        frontend.sidebarTabs.tabWidth * 1.5'f32,
-        frontend.sidebarTabs.tabBarHeight * 0.5'f32,
-      )
+    let findTabPoint = frontend.statusLabel.pointToWindow(
+      initPoint(47.0'f32, KosmoStatusBarHeight * 0.5'f32)
     )
     check frontend.window.mouseDownAt(findTabPoint)
     check frontend.window.mouseUpAt(findTabPoint)
     check frontend.sidebarTabs.selectedIndex == 1
-    let filesTabPoint = frontend.sidebarTabs.pointToWindow(
-      initPoint(
-        frontend.sidebarTabs.tabWidth * 0.5'f32,
-        frontend.sidebarTabs.tabBarHeight * 0.5'f32,
-      )
+    let filesTabPoint = frontend.statusLabel.pointToWindow(
+      initPoint(17.0'f32, KosmoStatusBarHeight * 0.5'f32)
     )
     check frontend.window.mouseDownAt(filesTabPoint)
     check frontend.window.mouseUpAt(filesTabPoint)
@@ -1015,3 +575,353 @@ suite "Kosmo":
       let editorIsFirstResponder =
         frontend.window.firstResponder() == Responder(frontend.editorView)
       check editorIsFirstResponder
+
+suite "Kosmo file replacement":
+  test "search controls retain visible toggle state and vector disclosure in both modes":
+    let
+      panel = newKosmoFileSearchPanel()
+      window = newWindow("Search appearance", frame = rect(0, 0, 360, 400))
+    defer:
+      panel.close()
+      window.close()
+    window.setContentView(panel)
+    panel.layoutSubtreeIfNeeded()
+    let toggle = panel.buttonWithLabel("Use Reni regular expressions")
+    let point = toggle.pointToWindow(initPoint(14, 13))
+    for enabled in [true, false]:
+      require window.clickAt(point)
+      check panel.regularExpression == enabled
+      check window.fieldEditorClient() == panel.queryField
+      let states =
+        if enabled:
+          {ssSelected}
+        else:
+          {}
+      let style = toggle.effectiveAppearance().resolveButtonStyle(
+          controlStyle(srButton, states, classes = toggle.styleClasses)
+        )
+      var foundFace = false
+      for node in buildRenders(toggle)[DefaultDrawLevel].resolvedNodes():
+        if node.kind == nkRectangle and node.fill == style.box.fill:
+          foundFace = true
+      check foundFace
+    let disclosure = panel.buttonWithLabel("Show replacement controls")
+    for expanded in [false, true, false]:
+      panel.replacementVisible = expanded
+      var iconCount = 0
+      for node in buildRenders(disclosure)[DefaultDrawLevel].resolvedNodes():
+        if node.kind == nkMtsdfImage and node.screenBox.w > 0 and node.screenBox.h > 0:
+          inc iconCount
+      check iconCount > 0
+
+  test "editor search draws a tinted FigDraw backdrop behind its controls":
+    let
+      editor = newKosmoEditor(text = "Readable text beneath the search overlay")
+      view = newKosmoEditorView(editor)
+      window = newWindow("Search backdrop", frame = rect(0, 0, 640, 360))
+    defer:
+      window.close()
+      editor.close()
+    window.setContentView(view)
+    view.layoutSubtreeIfNeeded()
+    view.refresh()
+    for expanded in [false, true]:
+      require view.showSearch(replacing = expanded)
+      let box = view.searchField().superview().superview()
+      let frame = box.rectToWindow(box.bounds)
+      var blurCount = 0
+      for node in window.buildRenders()[DefaultDrawLevel].resolvedNodes():
+        if node.kind == nkBackdropBlur:
+          inc blurCount
+          check node.backdropBlur.blur >= 16
+          check node.fill.centerColor().a >= 0.7
+          check node.screenBox.x == frame.minX
+          check node.screenBox.y == frame.minY
+          check node.screenBox.w == frame.size.width
+          check node.screenBox.h == frame.size.height
+      check blurCount == 1
+      for label in ["Previous editor text match", "Next editor text match"]:
+        let button = view.buttonWithLabel(label)
+        var iconCount = 0
+        for node in buildRenders(button)[DefaultDrawLevel].resolvedNodes():
+          if node.kind == nkMtsdfImage:
+            inc iconCount
+        check iconCount > 0
+
+  test "file search tabs through regex then replacement and skips hidden controls":
+    let
+      panel = newKosmoFileSearchPanel()
+      window = newWindow("File search focus", frame = rect(0, 0, 360, 400))
+      tab = KeyEvent(key: keyTab, keyCode: keyTab.ord)
+      backtab = KeyEvent(key: keyTab, keyCode: keyTab.ord, modifiers: {kmShift})
+      regex = panel.buttonWithLabel("Use Reni regular expressions")
+    defer:
+      window.close()
+    window.setContentView(panel)
+    panel.replacementVisible = true
+    panel.layoutSubtreeIfNeeded()
+    require panel.focusQuery()
+    require window.dispatchKeyDown(tab)
+    check window.firstResponder() == regex
+    require window.dispatchKeyDown(tab)
+    check window.fieldEditorClient() == panel.replacementField
+    require window.dispatchKeyDown(backtab)
+    check window.firstResponder() == regex
+    let point = panel.replacementField.pointToWindow(initPoint(40, 13))
+    require window.mouseDownAt(point)
+    discard window.mouseUpAt(point)
+    require window.fieldEditorClient() == panel.replacementField
+    require window.dispatchTextInput("dog")
+    check panel.replacementField.text == "dog"
+    check panel.queryField.text == ""
+    panel.replacementVisible = false
+    check window.fieldEditorClient() == panel.queryField
+    require window.dispatchKeyDown(tab)
+    check window.firstResponder() == regex
+    require window.dispatchKeyDown(tab)
+    check window.firstResponder() == panel.buttonWithLabel("Show replacement controls")
+
+  test "file search hides replacement until expanded and preserves results on mode changes":
+    let root = createTempDir("kosmo-search-modes-", "")
+    writeFile(root / "sample.txt", "cat cat\n")
+    let frontend = newKosmoApplication(
+      newApplication("File search modes"), filePath = root, monitorsGitStatus = false
+    )
+    defer:
+      frontend.close()
+      removeDir(root)
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.frame = rect(0, 0, 900, 600)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    let window = frontend.window
+    let panel = frontend.searchPanel
+    let modifiers = frontend.shortcutProfile().primaryModifiers() + {nimkit.kmShift}
+    let find = KeyEvent(key: keyF, keyCode: keyF.ord, modifiers: modifiers)
+    let replace =
+      KeyEvent(key: keyF, keyCode: keyF.ord, modifiers: modifiers + {nimkit.kmOption})
+    require window.makeFirstResponder(frontend.editorView)
+    require window.dispatchKeyDown(find)
+    check not panel.replacementVisible
+    check panel.replacementField.hidden
+    check panel.replaceButton.hidden
+    check panel.replaceAllButton.hidden
+    let compactResultsY = panel.resultsView.frame().minY
+    require window.dispatchTextInput("cat")
+    require panel.performSearch()
+    require panel.waitForSearch()
+    check panel.resultsView.matches.len == 2
+    let handle = panel.activeSearch()
+    let selected = panel.resultsView.matchIdentifier(0)
+    panel.resultsView.selectedItemIdentifier = selected
+
+    let toggle = panel.buttonWithLabel("Show replacement controls")
+    require not toggle.isNil
+    let point = toggle.pointToWindow(
+      initPoint(toggle.bounds().size.width / 2, toggle.bounds().size.height / 2)
+    )
+    require window.mouseDownAt(point)
+    require window.mouseUpAt(point)
+    check panel.replacementVisible
+    panel.replacementField.checkVisibleIn(panel)
+    panel.replaceAllButton.checkVisibleIn(panel)
+    check panel.resultsView.frame().minY > compactResultsY
+    let replacementPoint = panel.replacementField.pointToWindow(initPoint(40, 13))
+    require window.mouseDownAt(replacementPoint)
+    discard window.mouseUpAt(replacementPoint)
+    require window.fieldEditorClient() == panel.replacementField
+    require window.dispatchTextInput("dog")
+    require window.dispatchKeyDown(find)
+    check not panel.replacementVisible
+    check panel.replacementField.hidden
+    check window.fieldEditorClient() == panel.queryField
+    check panel.resultsView.frame().minY == compactResultsY
+
+    require window.dispatchKeyDown(replace)
+    check panel.replacementVisible
+    check panel.queryField.text() == "cat"
+    check panel.replacementField.text() == "dog"
+    check panel.activeSearch() == handle
+    check panel.resultsView.matches.len == 2
+    check panel.resultsView.selectedItemIdentifier == selected
+    require window.mouseDownAt(point)
+    require window.mouseUpAt(point)
+    check not panel.replacementVisible
+    check panel.resultsView.frame().minY == compactResultsY
+    require window.makeFirstResponder(frontend.editorView)
+    require window.dispatchKeyDown(replace)
+    check panel.replacementVisible
+    require frontend.showFileExplorer()
+    require window.dispatchKeyDown(find)
+    check not panel.replacementVisible
+
+  test "selected and all matches replace literal text and preserve CRLF":
+    let root = createTempDir("kosmo-replace-files-", "")
+    let path = root / "unicode.txt"
+    let second = root / "second.txt"
+    writeFile(path, "λ Cat cat\r\ncat\r\n")
+    writeFile(second, "cat\n")
+    let panel = newKosmoFileSearchPanel(root)
+    defer:
+      panel.close()
+      removeDir(root)
+    panel.queryField.text = "cat"
+    require panel.performSearch()
+    require panel.waitForSearch()
+    check panel.resultsView.matches.len == 4
+    panel.replacementField.text = "$1"
+    for index, match in panel.resultsView.matches:
+      if match.path == path and match.line == 1 and match.column == 4:
+        panel.resultsView.selectedItemIdentifier =
+          panel.resultsView.matchIdentifier(index)
+    check panel.replaceMatches() == 1
+    require panel.waitForSearch()
+    check readFile(path) == "λ $1 cat\r\ncat\r\n"
+    panel.replacementField.text = ""
+    check panel.replaceMatches(all = true) == 3
+    require panel.waitForSearch()
+    check readFile(path) == "λ $1 \r\n\r\n"
+    check readFile(second) == "\n"
+    check panel.resultsView.matches.len == 0
+    check "Replaced 3 matches" in panel.statusLabel.text
+
+  test "stale lines and changed queries cannot overwrite a file":
+    let root = createTempDir("kosmo-replace-stale-", "")
+    let path = root / "sample.txt"
+    writeFile(path, "cat cat\n")
+    let panel = newKosmoFileSearchPanel(root)
+    defer:
+      panel.close()
+      removeDir(root)
+    panel.queryField.text = "cat"
+    panel.replacementField.text = "dog"
+    require panel.performSearch()
+    require panel.waitForSearch()
+    panel.queryField.text = "dog"
+    check panel.replaceMatches(all = true) == 0
+    check readFile(path) == "cat cat\n"
+    panel.queryField.text = "cat"
+    writeFile(path, "bat cat\n")
+    check panel.replaceMatches(all = true) == 0
+    require panel.waitForSearch()
+    check readFile(path) == "bat cat\n"
+    check "skipped 1 files" in panel.statusLabel.text
+
+  test "workspace replacement refreshes clean editors and skips unsaved buffers":
+    let root = createTempDir("kosmo-replace-open-", "")
+    let path = root / "sample.txt"
+    writeFile(path, "cat cat\n")
+    let frontend = newKosmoApplication(
+      newApplication("Replace open buffers"), filePath = root, monitorsGitStatus = false
+    )
+    defer:
+      frontend.close()
+      removeDir(root)
+    frontend.window.setContentView(frontend.contentView)
+    require frontend.openPath(path)
+    let editor = frontend.editorView.editor
+    let id = editor.tabs()[0].id
+    let panel = frontend.searchPanel
+    panel.queryField.text = "cat"
+    panel.replacementField.text = "dog"
+    require panel.performSearch()
+    require panel.waitForSearch()
+    check panel.replaceMatches(all = true) == 2
+    require panel.waitForSearch()
+    check editor.bufferText(id).get == "dog dog"
+    check not editor.tabs()[0].modified
+    check editor.replaceSearch("dog", "cat", all = true) == 2
+    panel.queryField.text = "dog"
+    require panel.performSearch()
+    require panel.waitForSearch()
+    panel.replacementField.text = "lost"
+    check panel.replaceMatches(all = true) == 0
+    require panel.waitForSearch()
+    check readFile(path) == "dog dog\n"
+    check editor.bufferText(id).get == "cat cat"
+    check "Unsaved changes" in panel.statusLabel.text
+
+  test "replace all stays within the returned result limit":
+    let root = createTempDir("kosmo-replace-limit-", "")
+    let path = root / "sample.txt"
+    writeFile(path, "cat cat cat\n")
+    let panel = newKosmoFileSearchPanel(root)
+    defer:
+      panel.close()
+      removeDir(root)
+    panel.searchOptions = initFileSearchOptions(maxResults = 2)
+    panel.queryField.text = "cat"
+    panel.replacementField.text = "dog"
+    require panel.performSearch()
+    require panel.waitForSearch()
+    check panel.replaceMatches(all = true) == 2
+    require panel.waitForSearch()
+    check readFile(path) == "dog dog cat\n"
+    check panel.resultsView.matches.len == 1
+
+  test "file replacement uses named captures and rejects invalid templates before saving":
+    let root = createTempDir("kosmo-reni-files-", "")
+    let first = root / "first.txt"
+    let second = root / "second.txt"
+    writeFile(first, "λ pre:cat\r\n")
+    writeFile(second, "pre:dog\n")
+    let panel = newKosmoFileSearchPanel(root)
+    defer:
+      panel.close()
+      removeDir(root)
+    panel.queryField.text = r"pre:\K(?<animal>\w+)"
+    require panel.performSearch()
+    require panel.waitForSearch()
+    check panel.resultsView.matches.len == 0
+    panel.regularExpression = true
+    require panel.waitForSearch()
+    require panel.resultsView.matches.len == 2
+    panel.replacementField.text = "${missing}"
+    check panel.replaceMatches(all = true) == 0
+    check "Replacement error" in panel.statusLabel.text
+    check readFile(first) == "λ pre:cat\r\n"
+    check readFile(second) == "pre:dog\n"
+    panel.replacementField.text = "${animal}-$0-$$"
+    check panel.replaceMatches(all = true) == 2
+    require panel.waitForSearch()
+    check readFile(first) == "λ pre:cat-cat-$\r\n"
+    check readFile(second) == "pre:dog-dog-$\n"
+    panel.regularExpression = false
+    require panel.waitForSearch()
+    check panel.resultsView.matches.len == 0
+
+  test "file expression toggle refreshes results and reports invalid patterns":
+    let root = createTempDir("kosmo-reni-toggle-", "")
+    writeFile(root / "sample.txt", "a.b axb\n")
+    let panel = newKosmoFileSearchPanel(root)
+    let window = newWindow("Reni file controls", frame = rect(0, 0, 360, 400))
+    defer:
+      panel.close()
+      window.close()
+      removeDir(root)
+    window.setContentView(panel)
+    panel.layoutSubtreeIfNeeded()
+    panel.queryField.text = "a.b"
+    require panel.performSearch()
+    require panel.waitForSearch()
+    check panel.resultsView.matches.len == 1
+    let toggle = panel.buttonWithLabel("Use Reni regular expressions")
+    require not toggle.isNil
+    toggle.checkVisibleIn(panel)
+    let point = toggle.pointToWindow(
+      initPoint(toggle.bounds().size.width / 2, toggle.bounds().size.height / 2)
+    )
+    require window.mouseDownAt(point)
+    require window.mouseUpAt(point)
+    require panel.waitForSearch()
+    check panel.regularExpression
+    check panel.resultsView.matches.len == 2
+    panel.queryField.text = "("
+    check not panel.performSearch()
+    check panel.activeSearch().isNil
+    check not panel.replaceAllButton.enabled
+    check panel.statusLabel.text.len > 0
+    require window.mouseDownAt(point)
+    require window.mouseUpAt(point)
+    require panel.waitForSearch()
+    check not panel.regularExpression
+    check panel.resultsView.matches.len == 0

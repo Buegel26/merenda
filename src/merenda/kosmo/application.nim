@@ -24,7 +24,7 @@ import
     applicationassets, cliopen, config, contextpanel, filesearchpanel, filetree,
     gitdiff, inputtranslation, matterworkers, moe, moehighlighting, panedocuments,
     quickopen, searchbar, settings, shortcutpresentation, shortcuts, terminalsearch,
-    workspacefiles,
+    viewersearch, workspacefiles,
   ]
 
 export
@@ -35,7 +35,9 @@ export shortcutpresentation except focusPanelNumber
 
 const
   KosmoTabBarHeight* = 34.0'f32
-  KosmoStatusBarHeight* = 22.0'f32
+  KosmoStatusBarHeight* = 28.0'f32
+  KosmoStatusIconWidth = 30.0'f32
+  KosmoStatusLabelStyleId = "kosmo.status-label"
   KosmoCommandBarLineHeightMultiplier = 1.6'f32
   KosmoRenameAlertHeight* = 240.0'f32
   KosmoQuickOpenTopInset = 96.0'f32
@@ -61,6 +63,8 @@ const
   KosmoGridOverscanRows = 1
   KosmoMoeBottomAreaRows = 1
   KosmoTabIdentifierPrefix = "kosmo.buffer."
+  KosmoHelpTabIdentifier* = "kosmo.help"
+  KosmoConfigTabIdentifier* = "kosmo.config"
   KosmoTerminalIdentifierPrefix = "kosmo.terminal."
   KosmoFilesTabIdentifier* = "kosmo.sidebar.files"
   KosmoFindTabIdentifier* = "kosmo.sidebar.find"

@@ -8,6 +8,7 @@ import figdraw except Hash, TextCaretPosition
 import ../drawing
 import ../foundation/mainthreadwork
 import ../foundation/selectors
+import ../responder/responders
 import ./textstorage
 import ./textlayoutworkers
 import ./textlayouttypes
@@ -47,6 +48,8 @@ type
     xAlignment: TextAlignment
     xBackend: TextLayoutBackend
     xClient: DynamicAgent
+    # Responder clients often own the manager, so retain a tracked back link.
+    xResponderClient: BackRef[Responder]
     xDelegate: DynamicAgent
     xMutableLayout: GlyphArrangement
     xSharedLayout: ConstPtr[GlyphArrangement]
@@ -238,6 +241,8 @@ protocol TextLayoutStorageEditingSlots of TextStorageEditingEvents:
   ) {.slot.} =
     if tseCharacters in edit.kinds:
       manager.defaultInvalidateCharacters(edit.range)
+    elif edit.displayOnly:
+      manager.defaultInvalidateDisplay(edit.range)
     else:
       manager.defaultInvalidateLayout(edit.range)
 
@@ -689,12 +694,19 @@ proc `textLayoutBackend=`*(manager: TextLayoutManager, backend: TextLayoutBacken
   manager.invalidateLayout()
 
 proc layoutClient*(manager: TextLayoutManager): DynamicAgent =
+  if not manager.xResponderClient.isNil:
+    return DynamicAgent(manager.xResponderClient.target)
   manager.xClient
 
 proc `layoutClient=`*(manager: TextLayoutManager, client: DynamicAgent) =
-  if manager.xClient == client:
+  if manager.layoutClient() == client:
     return
-  manager.xClient = client
+  manager.xResponderClient.clear()
+  manager.xClient = nil
+  if not client.isNil and client of Responder:
+    manager.xResponderClient.target = Responder(client)
+  else:
+    manager.xClient = client
   manager.invalidateLayout()
 
 proc delegate*(manager: TextLayoutManager): DynamicAgent =
@@ -889,16 +901,17 @@ func toTextCaretPositionKind(affinity: TextCaretAffinity): TextCaretPositionKind
   of CaretTrailing: tcpTrailing
 
 proc applyClientInputs(manager: TextLayoutManager) =
-  if manager.xClient.isNil:
+  let client = manager.layoutClient()
+  if client.isNil:
     return
-  let storage = manager.xClient.trySendLocal(textLayoutStorage(), manager)
+  let storage = client.trySendLocal(textLayoutStorage(), manager)
   if storage.isSome and storage.get() != manager.xTextStorage:
     manager.unobserveTextStorage(manager.xTextStorage)
     manager.xTextStorage = storage.get()
     manager.observeTextStorage(manager.xTextStorage)
     manager.markLayoutInvalid(containerOnly = false)
 
-  let containers = manager.xClient.trySendLocal(textLayoutContainers(), manager)
+  let containers = client.trySendLocal(textLayoutContainers(), manager)
   if containers.isSome and containers.get().len > 0:
     let supplied = containers.get()
     if supplied != manager.effectiveContainers():
@@ -906,18 +919,18 @@ proc applyClientInputs(manager: TextLayoutManager) =
       manager.xTextContainers = supplied
       manager.markLayoutInvalid(containerOnly = true)
   else:
-    let container = manager.xClient.trySendLocal(textLayoutContainer(), manager)
+    let container = client.trySendLocal(textLayoutContainer(), manager)
     if container.isSome and
         (manager.xTextContainers.len > 0 or container.get() != manager.xTextContainer):
       manager.xTextContainer = container.get()
       manager.xTextContainers.setLen(0)
       manager.markLayoutInvalid(containerOnly = true)
 
-  let style = manager.xClient.trySendLocal(textLayoutStyle(), manager)
+  let style = client.trySendLocal(textLayoutStyle(), manager)
   if style.isSome and style.get() != manager.xTextStyle:
     manager.xTextStyle = style.get()
     manager.markLayoutInvalid(containerOnly = false)
-  let alignment = manager.xClient.trySendLocal(textLayoutAlignment(), manager)
+  let alignment = client.trySendLocal(textLayoutAlignment(), manager)
   if alignment.isSome and alignment.get() != manager.xAlignment:
     manager.xAlignment = alignment.get()
     manager.markLayoutInvalid(containerOnly = false)
@@ -960,7 +973,15 @@ proc defaultInvalidateGlyphs(manager: TextLayoutManager, range: GlyphRange) =
   emit manager.layoutDidInvalidate(manager.xInvalidatedRanges)
 
 proc defaultInvalidateDisplay(manager: TextLayoutManager, range: TextRange) =
-  manager.recordInvalidation(invalidationForText(tlikDisplay, range))
+  if manager.xInvalidations.len > 0 and manager.xInvalidations[^1].kind == tlikDisplay:
+    let
+      previous = manager.xInvalidations[^1].textRange
+      first = min(int(previous.location), int(range.location))
+      stop = max(previous.maxIndex, range.maxIndex)
+    manager.xInvalidations[^1].textRange = initTextRange(first, stop - first)
+    emit manager.textLayoutDidInvalidate(manager.xInvalidations)
+  else:
+    manager.recordInvalidation(invalidationForText(tlikDisplay, range))
 
 proc defaultInvalidateContainer(manager: TextLayoutManager, index: TextContainerIndex) =
   let containers = manager.effectiveContainers()
@@ -1209,8 +1230,14 @@ proc glyphArrangement*(manager: TextLayoutManager): GlyphArrangement =
     result.shared = manager.xSharedLayout
   else:
     result = manager.xSharedLayout.glyphArrangementView(0 .. glyphCount - 1)
+    result.applyTextColors(manager.xTextStorage)
+    if not manager.xTextStorage.isNil:
+      result.contentHash =
+        hash((manager.xLayout.contentHash, manager.xTextStorage.revision))
 
 proc glyphArrangementResource*(manager: TextLayoutManager): ConstPtr[GlyphArrangement] =
+  ## Borrow immutable glyph geometry. Renderers apply current storage colors to
+  ## their range views, since display-only edits preserve this shared resource.
   manager.updateLayout()
   manager.xSharedLayout
 
