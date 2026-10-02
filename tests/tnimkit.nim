@@ -74,8 +74,6 @@ else:
   import nimkit/tableviews
   import nimkit/tabviews
   import nimkit/terminalgeometry
-  import nimkit/terminalsnapshots
-  import nimkit/terminalworkers
   import nimkit/texteditors
   import nimkit/textfields
   import nimkit/textlayout

@@ -18,9 +18,12 @@ proc outputReady(watch: TerminalOutputWatch) {.slot.} =
     recordTerminalTrace("ui-ready", watch.session.workerIdentity())
     emit watch.terminalOutputReady(watch.token)
 
+var nextWatchIdentity {.threadvar.}: uint64
+
 proc newTerminalOutputWatch*(session: TerminalViewSession): TerminalOutputWatch =
   if not session.isNil:
-    result = TerminalOutputWatch(token: nextTerminalIdentity(), session: session)
+    inc nextWatchIdentity
+    result = TerminalOutputWatch(token: nextWatchIdentity, session: session)
 
 proc start*(watch: TerminalOutputWatch) =
   if watch.isNil or watch.started or watch.stopped:

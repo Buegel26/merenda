@@ -179,7 +179,7 @@ when defined(posix):
 
     when defined(macosx) or defined(linux):
       test "closing worker sessions releases PTYs and readiness descriptors":
-        discard nimkitTerminalThread()
+        discard terminalWorkerThread()
         let baseline = processResourceUsage().fileDescriptors
         require baseline >= 0
         for index in 0 ..< 3:
@@ -282,7 +282,7 @@ when defined(posix):
       waitFor(session.pendingCommands() == 0)
       let state = newSharedPtr(WorkerGateState())
       var actor = WorkerGate(state: state)
-      let gate = actor.moveToThread(nimkitTerminalThread())
+      let gate = actor.moveToThread(terminalWorkerThread())
       connectThreaded(gate, enterGate, gate, WorkerGate.enterGate())
       defer:
         state[].released.store(true, moRelease)

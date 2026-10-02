@@ -4,11 +4,11 @@
 import std/exitprocs
 import sigils/threads
 import sigils/threadChronos
+import terminex/workerthreads
 
 var
   backgroundPool {.threadvar.}: SigilThreadPoolPtr
   backgroundTimers {.threadvar.}: SigilChronosThreadPtr
-  backgroundTerminals {.threadvar.}: SigilChronosThreadPtr
   exitRegistered {.threadvar.}: bool
 
 proc stopDispatcher(dispatcher: var SigilChronosThreadPtr) =
@@ -25,7 +25,7 @@ proc shutdownNimkitBackgroundWorkers*() {.noconv.} =
   ## Stop and join every shared dispatcher even when one shutdown raises.
   ## Call on the owning UI thread. Repeated calls are harmless.
   try:
-    stopDispatcher(backgroundTerminals)
+    shutdownTerminalWorkers()
   finally:
     try:
       stopDispatcher(backgroundTimers)
@@ -68,13 +68,5 @@ proc nimkitTimerThread*(): SigilChronosThreadPtr =
     backgroundTimers = newSigilChronosThread()
     backgroundTimers.start()
   backgroundTimers
-
-proc nimkitTerminalThread*(): SigilChronosThreadPtr =
-  ## Borrow a dedicated readiness dispatcher so PTY floods cannot delay timers.
-  discard nimkitWorkerPool()
-  if backgroundTerminals.isNil:
-    backgroundTerminals = newSigilChronosThread()
-    backgroundTerminals.start()
-  backgroundTerminals
 
 var backgroundWorkerLifetime {.used.}: NimkitBackgroundWorkerLifetime

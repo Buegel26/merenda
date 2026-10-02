@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Move reusable terminal sessions, Sigils commands, RChan snapshots, and the
+  dedicated worker dispatcher into Terminex 0.4.0's optional threaded adapter.
+  NimKit retains viewports, rendering, and native event-loop integration; the
+  Terminex parser, synchronous PTY API, and snapshot helpers also work without
+  Sigils or threads.
+
 - Keep terminal updates and animation deadlines running during native macOS menu
   tracking and modal panels. Rearm worker wake notifications consumed by AppKit
   so opening About does not leave terminals updating in slow chunks afterward.

@@ -125,6 +125,12 @@ large output floods than to the ordinary `cmatrix` batches measured here.
 
 ## Scheduling
 
+`TerminalViewSession` is NimKit's alias for Terminex's `ThreadedTerminalSession`.
+Terminex owns the generic session facade, snapshots, commands, trace recorder,
+and worker lifecycle; NimKit adds viewport anchoring, subscriptions, rendering,
+and native event-loop integration. The macOS tracking/modal-loop wakeup fix
+remains in NimKit.
+
 Every `TerminalViewSession` owns a worker proxy on the dedicated Sigils terminal
 readiness dispatcher. The worker exclusively owns its raw Terminex session,
 including parsing, input, resize, startup, signals, and process cleanup. Multiple
@@ -210,9 +216,28 @@ worker output, including scrollback eviction, clear, and resize.
 
 ## Dependency
 
-Terminex 0.3.3 provides budgeted polling, `readPaused`, and `outputClosed`, and
-waits for output to drain before reporting process exit. Use the Terminex
-requirement configured in Merenda's Atlas dependencies; 0.3.2 lacks these APIs.
+Terminex 0.4.0 adds the optional `sigils` feature and `terminex/threaded` API used
+by NimKit. Merenda pins the extraction commit until that release is available.
+Use the requirement configured in Merenda's Atlas dependencies. The core
+`import terminex` remains independent of Sigils and works with threads disabled;
+it exposes synchronous parsing, budgeted PTY polling, and owned snapshot helpers.
+Merenda's `-d:nimkitTerminalTrace` also enables `-d:terminexTrace`, preserving the
+existing diagnostic command across both libraries.
+
+## Terminex extraction validation
+
+- Terminex PR #6 passes the core and optional Sigils suites on Linux and macOS,
+  including core builds with threads disabled and worker tests under ORC.
+- In an independent local Atlas workspace, all eight Terminex runners passed.
+  Worker and automatic-shutdown tests also passed with ORC + AddressSanitizer/
+  UBSan and tracing enabled, and with ARC in release mode.
+- Core tests and examples passed with threads disabled and only core dependency
+  paths configured. The threaded example bundle also compiled, and Windows
+  amd64 C generation passed; Windows native execution was not tested.
+- Merenda's four shared runners passed against the extracted modules, the
+  example bundle compiled, and the existing trace probe passed semantic checking.
+
+No performance benchmark was run for the extraction.
 
 ## Exclusive-ownership validation
 
