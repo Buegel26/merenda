@@ -2,10 +2,19 @@
 
 ## Unreleased
 
-- Read and parse view-owned terminal sessions on a dedicated readiness worker,
-  coalescing UI notifications while continuing to drain output. Serialize input,
-  resize, and lifecycle operations with parsing, and render owned viewport
-  snapshots. Externally supplied raw Terminex sessions retain cooperative reads.
+- Give terminal workers exclusive session ownership. Send commands through Sigils
+  and transfer bounded, owned snapshots through RChan, removing parser mutexes
+  and UI lock-priority retries. Keep parsing independent of presentation while
+  transferring only newly retained history. All view sessions use this worker
+  path, including offline parsing and Windows builds; native Windows PTY startup
+  still needs a ConPTY backend in Terminex.
+- Track deferred terminal UI callbacks with `BackRef` so queued work cannot
+  dereference a destroyed view during ORC collection.
+- Terminal view mutations are now asynchronous. Use `newTerminalViewSession()` or
+  `spawnTerminalViewSession()` instead of passing raw Terminex sessions to views.
+  Queries return the last received snapshot; `poll()` consumes available updates,
+  and `pendingCommands()` reports outstanding commands. Closing marks the facade
+  closed immediately and queues process cleanup on the worker.
 
 - Batch matching terminal glyph styles within each changed row and skip blank
   glyphs while retaining their backgrounds and decorations. Defer frame

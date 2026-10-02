@@ -38,7 +38,10 @@ end-to-end correlation assumes one terminal and one native window, using the
 dedicated renderer's render IDs. A fallback renderer still exposes individual
 stage timings.
 
-## Row batching and worker measurements
+## Historical row batching and shared-lock worker measurements
+
+These measurements describe `6b891cca` and the shared-lock worker in `bcdf6907`.
+The subsequent exclusive-ownership/RChan design has not been benchmarked.
 
 The rendering/frame-pacing changes are isolated in `6b891cca`. On the same
 machine and Kosmo `cmatrix` workload, row batching reduced p95 frame
@@ -122,42 +125,47 @@ large output floods than to the ordinary `cmatrix` batches measured here.
 
 ## Scheduling
 
-View-owned sessions read and parse output on a dedicated readiness dispatcher,
-with a 2 ms budget between Terminex read chunks. A chunk can exceed that budget;
-it is a cooperative bound, not a hard deadline. The worker rearms readiness
-without waiting for the UI, and coalesces notifications until the UI consumes the
-pending update. Timers use a separate dispatcher, so terminal floods do not
-occupy the timer thread. Healthy idle sessions perform no reads.
+Every `TerminalViewSession` owns a worker proxy on the dedicated Sigils terminal
+readiness dispatcher. The worker exclusively owns its raw Terminex session,
+including parsing, input, resize, startup, signals, and process cleanup. Multiple
+terminals share this dispatcher, separate from the timer dispatcher and general
+worker pool. POSIX readiness reads use a cooperative 2 ms budget between chunks;
+a single chunk can exceed that budget. Rearming never waits for the UI.
 
-Input, resize and lifecycle operations serialize with parsing through the
-session lock. Pending UI access has priority over another worker read. If the
-lock is occupied or a UI caller is waiting, the worker schedules a one-shot
-1 ms continuation instead of repeatedly reacquiring the lock or spinning. This
-continuation is used only during contention and is cancelled with the watch.
-The UI copies a consistent viewport under that lock and releases it before
-constructing a frame. It does not copy the scrollback on every frame.
+Commands use Sigils `sink` arguments. Screen snapshots cross a capacity-one
+RChan as isolated owned values. The UI acknowledges each received snapshot;
+normal publication has one outstanding snapshot and at least 8 ms between
+publications during continuous output. The first update after idle is immediate.
+While publication is waiting for an acknowledgement, the worker keeps reading
+and parsing. EOF and lifecycle changes may replace an unread snapshot. Snapshots
+carry cumulative byte counts and history since the last acknowledgement, so
+replacement cannot lose retained output. Publication timers are one-shot and
+exist only while there is dirty state to publish.
+
+The UI holds its own compact history and live rows. It applies newly retained
+history and replaces live rows, then builds visible rows from this local cache.
+Neither queries nor rendering acquire a parser lock. RChan holds its internal
+lock only while transferring an owned message; parsing, copying rows, applying
+history, and rendering occur outside that lock. There is no UI-priority lock
+workaround or synchronous session fallback.
+
+Presentation retains its own coalesced frame deadline. Final output is
+synchronized before process-exit notification. Detaching a view cancels its UI
+subscription and pending frame; the session worker continues draining output.
+Closing or restarting increments the session epoch, so an earlier snapshot
+cannot overwrite the new lifecycle state.
+
+Healthy idle PTYs have no periodic reads. The worker schedules maintenance for
+backpressured input or an EOF whose child exit is not yet observable. If native
+readiness registration fails, polling stays on the worker with a 16 ms fallback;
+it never moves parsing onto the UI. The view's 500 ms heartbeat handles blinking
+and observes direct close. Windows builds use the same worker API, but Terminex
+currently rejects native shell startup there because it lacks ConPTY support.
+
 `worker-poll-start` to `worker-poll-end` measures worker read/parse work;
-`poll-start` to `poll-end` now measures consumption of the pending result for
-these sessions. Cumulative worker read serials are recorded with each viewport
-snapshot, so readiness-to-presentation latency includes reads incorporated into
-a frame before their coalesced notification is consumed. The serials contain no
-terminal text.
-
-Passing an externally owned raw `CompactTerminalSession` to a view retains
-cooperative UI reads, because external aliases cannot participate in the lock.
-The existing 2 ms UI read budget still applies to that path.
-
-Reading and presentation are independent. The first grid update after idle is
-scheduled immediately, with at least 8 ms between grid updates during a burst
-(or the window's configured animation interval if it is shorter).
-Further output keeps the same pending deadline instead of postponing
-it. Final output is synchronized before publishing process exit. Closing,
-detaching or replacing a session invalidates pending work and cancels its frame.
-
-A healthy idle terminal does not poll its PTY or run a fast frame timer. The
-500 ms heartbeat handles blinking and retries pending input or process exit
-after a hangup. Systems without a working readiness watch retain the existing
-animation-driven polling fallback, with the same bounded read work.
+`poll-start` to `poll-end` measures UI consumption of snapshots. Cumulative worker
+read serials accompany viewport snapshots for trace correlation. Traces contain
+no terminal text.
 
 ## Frame construction and row drawing
 
@@ -175,35 +183,61 @@ new periodic idle timer.
 
 ## Session API and ownership
 
-`TerminalViewSession` is now a synchronized handle, rather than a type alias for
-Terminex's raw session. `newTerminalView()` and `newTerminalView(options)` create
-worker-capable sessions. Use `newTerminalViewSession()` when constructing a
-session separately; start it through `session.start(options)`. Existing raw
-compact sessions convert to a view session and keep their UI-owned behavior.
+Use `newTerminalViewSession()` for an idle, worker-owned session, or
+`spawnTerminalViewSession(options)` to queue startup. `newTerminalView()` and
+`newTerminalView(options)` use the same path. Raw `CompactTerminalSession` aliases
+are no longer accepted by views: they cannot establish exclusive worker ownership.
+Terminex's standalone raw API remains available for its own callers.
 
-Read-only `screenInfo()` and `lineAtAbsolute()` return owned values. `screen()`
-returns an owned full-screen/history snapshot, so prefer the smaller queries for
-frequent inspection. The view's internal viewport snapshot captures metadata and
-visible rows together. Synchronous `write`, `resize`, `poll`, `close`, and signal
-operations remain available through `view.session()`.
+`screenInfo()` and `lineAtAbsolute()` return owned values from the UI cache.
+`screen()` returns a `TerminalScreenSnapshot` containing owned screen/history,
+so prefer smaller queries for frequent inspection. A viewport snapshot captures
+metadata and visible rows together without waiting on the worker.
 
-Detach, replacement and close invalidate the worker token before queued startup
-or readiness callbacks can resume reads. Final output remains in the session
-and is synchronized before process-exit notification. After hangup, the existing
-maintenance heartbeat collects a child whose exit was not yet observable.
+`processOutput`, `write`, `resize`, `clearScrollback`, limit changes, signals,
+`start`, and `close` enqueue ordered commands. `poll()` only consumes available
+snapshots; it does not wait for command completion or read the PTY. Pump the owning
+Sigils event loop to receive automatic updates. `pendingCommands()` reaches zero
+when all submitted commands have been applied and acknowledged in a snapshot.
+`running()` includes pending startup. Startup failures arrive through `state()`
+and `lastError()`. Signal methods return whether delivery was queued, not whether
+the OS accepted it. `close()` marks the facade closed immediately; process
+termination and reaping complete on the worker.
 
-## Dependency change
+A snapshot owns value fields, strings, and cell sequences. It contains no live
+session references. Previously returned snapshots remain unchanged by later
+worker output, including scrollback eviction, clear, and resize.
 
-This work also prepares Terminex 0.3.3 in the Atlas-managed `deps/terminex`
-checkout: `poll` accepts
-`timeBudget` and returns `readPaused` and `outputClosed`. Its exit check now waits
-until output is drained, and queued input cannot prevent exit collection after
-the PTY closes. Merenda pins the Terminex implementation commit while its
-0.3.3 change is under review, so clean Atlas installations can use this branch.
-After Terminex 0.3.3 is released, the pin can become a version requirement.
-An unmodified Terminex 0.3.2 does not provide the new API.
+## Dependency
 
-## Worker validation
+Terminex 0.3.3 provides budgeted polling, `readPaused`, and `outputClosed`, and
+waits for output to drain before reporting process exit. Use the Terminex
+requirement configured in Merenda's Atlas dependencies; 0.3.2 lacks these APIs.
+
+## Exclusive-ownership validation
+
+- All four normal shared runners passed, including the final integration rerun.
+- The example bundle compiled with
+  `atlas-run tests --compile-only examples/all_compile.nim`.
+- Windows amd64 semantic checking and C generation passed for the terminal
+  session/worker modules. Windows native execution was not tested.
+- All 90 focused terminal checks passed with ORC and AddressSanitizer/UBSan:
+  79 integration checks and 11 snapshot, worker, and geometry checks. This does
+  not claim a clean full ORC sanitizer suite; the historical workspace-watcher
+  teardown defect below remains outside this change.
+- Tests cover offline worker commands, independent sessions, immutable snapshots,
+  overlapping and skipped history updates, alternate screens, retained clipboard
+  requests, input queue limits, resize/write ordering, close/restart epochs, and
+  final output. A blocked-dispatcher test checks that UI queries and command
+  submission finish without worker access. A withheld-ACK test verifies that
+  PTY draining and final snapshot delivery continue while the UI is stalled.
+- Deferred UI work now uses a lifetime-tracked `BackRef`. A destruction
+  regression verifies that draining queued callbacks after ORC collects their
+  view is harmless; this fixes a use-after-free found during sanitizer validation.
+
+No new performance benchmark was run for this ownership design.
+
+## Historical shared-lock worker validation
 
 - The normal full suite passed all four shared runners; the example bundle
   compiled with `atlas-run tests --compile-only examples/all_compile.nim`.

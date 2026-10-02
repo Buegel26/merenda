@@ -1,31 +1,26 @@
-## Synchronized terminal sessions for UI access and readiness-driven parsing.
-## No borrowed screen storage crosses the lock. Rendering uses an owned viewport
-## snapshot; input and resize remain synchronous and serialize with parser work.
+## UI-owned terminal facade. Managed sessions move once into their worker;
+## subsequent access uses commands and owned snapshots, never a parser mutex.
 
-import std/[atomics, locks, math, monotimes, times]
-import threading/smartptrs
-import terminex/[compactscrollback, termscreen, termsessions]
+import std/math
+import sigils/[core, rchannels, threadProxies, threads]
+import ./[terminalsessiondata, terminalsessionworker]
 
-export compactscrollback, termscreen, termsessions
+export terminalsessiondata
 
 type
-  TerminalSessionStorage = object
-    lock: Lock
-    lockReady: bool
-    uiWaiters: Atomic[int]
-    session: CompactTerminalSession[TerminexCell]
-    workerAllowed: bool
-    workerToken, readSerial: uint64
-    notificationPending: bool
-    outputClosed: bool
+  TerminalViewSession* = ref object of Agent
+    cache: TerminalScreenSnapshot
+    snapshots: RChan[TerminalSessionSnapshot]
+    token, epoch, receivedSerial, readSerial, bytesRead: uint64
+    commandSerial, appliedCommand, clipboardSerial: uint64
+    submittedWriteBytes, processedWriteBytes: uint64
+    cachedState: TerminexSessionState
+    cachedExitCode, cachedPendingWrite, xReadLimit, xWriteLimit: int
+    cachedError, clipboard: string
     pending: TerminexPollResult
-
-  TerminalSessionHandle* = SharedPtr[TerminalSessionStorage]
-    ## Internal worker handle. Access its session only through this module.
-
-  TerminalViewSession* = ref object
-    storage: TerminalSessionHandle
-    identity: pointer
+    notificationPending, outputClosed: bool
+    desiredColumns, desiredRows: int
+    worker: AgentProxy[TerminalSessionWorker]
 
   TerminalViewportSnapshot* = object
     info*: TerminexScreenInfo
@@ -34,277 +29,228 @@ type
     lines*: seq[TerminexLine]
     workerToken*, readSerial*: uint64
 
-proc `=destroy`(storage: TerminalSessionStorage) =
-  let owned = addr storage
-  if owned.lockReady:
-    deinitLock(owned.lock)
-  {.cast(raises: []).}:
-    `=destroy`(owned.session)
+proc sessionOutputAvailable*(session: TerminalViewSession) {.signal.}
+func workerIdentity*(session: TerminalViewSession): uint64 =
+  session.token
+func pendingCommands*(session: TerminalViewSession): uint64 =
+  session.commandSerial - session.appliedCommand
 
-proc `=copy`(
-  target: var TerminalSessionStorage, source: TerminalSessionStorage
-) {.error.}
+proc submit(session: TerminalViewSession, command: sink TerminalCommand) =
+  var command = ensureMove command
+  inc session.commandSerial
+  command.serial = session.commandSerial
+  command.epoch = session.epoch
+  emit session.worker.commandRequested(ensureMove command)
 
-proc `=dup`(source: TerminalSessionStorage): TerminalSessionStorage {.error.}
+proc collectSnapshots(session: TerminalViewSession) =
+  var update: TerminalSessionSnapshot
+  while session.snapshots.tryRecv(update):
+    let acknowledgement = TerminalCommand(
+      kind: tcAcknowledge,
+      epoch: update.epoch,
+      snapshotSerial: update.serial,
+      historyAdded: update.info.scrollbackLinesAdded,
+      historyReset: update.info.scrollbackResetCount,
+      clipboardSerial: update.clipboardSerial,
+    )
+    if update.epoch == session.epoch and update.serial > session.receivedSerial:
+      session.pending.bytesRead += int(update.bytesRead - session.bytesRead)
+      session.pending.screenChanged =
+        session.pending.screenChanged or update.info != session.cache.info or
+        update.state != session.cachedState or update.lastError != session.cachedError
+      session.pending.processExited =
+        session.pending.processExited or update.state == tssExited
+      session.pending.outputClosed = update.outputClosed
+      session.outputClosed = update.outputClosed
+      session.receivedSerial = update.serial
+      session.readSerial = update.readSerial
+      session.bytesRead = update.bytesRead
+      session.appliedCommand = update.appliedCommand
+      session.cachedState = update.state
+      session.cachedExitCode = update.exitCode
+      session.cachedPendingWrite = update.pendingWriteBytes
+      session.processedWriteBytes = update.processedWriteBytes
+      session.cachedError = update.lastError
+      var clipboardPending = session.cache.info.clipboardRequestPending
+      if update.clipboardSerial > session.clipboardSerial:
+        session.clipboardSerial = update.clipboardSerial
+        session.clipboard = move(update.clipboard)
+        clipboardPending = true
+      update.info.clipboardRequestPending = clipboardPending
+      session.cache.applySnapshot(move(update))
+    # ACK releases publication credit, never PTY read/parse progress.
+    emit session.worker.commandRequested(acknowledgement)
+  if not session.notificationPending and (
+    session.pending.bytesRead > 0 or session.pending.screenChanged or
+    session.pending.processExited or session.pending.outputClosed
+  ):
+    session.notificationPending = true
+    emit session.sessionOutputAvailable()
 
-proc wrapSession(
-    session: CompactTerminalSession[TerminexCell], workerAllowed: bool
-): TerminalViewSession =
-  if session.isNil:
-    return
-  result = TerminalViewSession(identity: cast[pointer](session))
-  result.storage = newSharedPtr(TerminalSessionStorage)
-  initLock(result.storage[].lock)
-  result.storage[].lockReady = true
-  result.storage[].session = session
-  result.storage[].workerAllowed = workerAllowed
-
-converter toTerminalViewSession*(
-    session: CompactTerminalSession[TerminexCell]
-): TerminalViewSession =
-  ## Borrow an externally owned Terminex session on the UI thread. Its aliases
-  ## cannot be synchronized here, so these sessions retain cooperative polling.
-  wrapSession(session, workerAllowed = false)
+proc snapshotArrived(session: TerminalViewSession, token: uint64) {.slot.} =
+  if token == session.token:
+    session.collectSnapshots()
 
 proc newTerminalViewSession*(
     columns = 80, rows = 24, maxScrollback = 10_000
 ): TerminalViewSession =
-  ## Own a session whose parsing may run on the terminal worker.
-  wrapSession(
-    newCompactTerminalSession(columns, rows, maxScrollback), workerAllowed = true
+  ## All mutations run on the terminal dispatcher, including offline parsing.
+  ## Queries return the latest received snapshot. Pump the owning event loop
+  ## or call poll() to receive updates; pendingCommands() tracks completion.
+  var initial = newCompactTerminalSession(columns, rows, maxScrollback)
+  result = TerminalViewSession(
+    cache: initial.copyScreen(),
+    snapshots: newRChan[TerminalSessionSnapshot](1),
+    token: nextTerminalIdentity(),
+    epoch: 1,
+    cachedState: tssIdle,
+    cachedExitCode: -1,
+    xReadLimit: initial.readLimit(),
+    xWriteLimit: initial.writeLimit(),
+    desiredColumns: max(columns, 1),
+    desiredRows: max(rows, 1),
   )
-
-func `==`*(left, right: TerminalViewSession): bool =
-  if left.isNil or right.isNil:
-    left.isNil and right.isNil
-  else:
-    left.identity == right.identity
-
-template withSessionLock(handle: TerminalSessionHandle, body: untyped): untyped =
-  # pthread mutexes do not promise fair reacquisition. Announce UI access before
-  # waiting so a continuously readable PTY cannot starve a viewport snapshot.
-  discard handle[].uiWaiters.fetchAdd(1, moAcquireRelease)
-  try:
-    withLock handle[].lock:
-      body
-  finally:
-    discard handle[].uiWaiters.fetchSub(1, moAcquireRelease)
-
-template locked(session: TerminalViewSession, body: untyped): untyped =
-  withSessionLock(session.storage):
-    body
+  result.worker = newTerminalSessionWorker(
+    ensureMove initial, result.snapshots, result.token, result.epoch
+  )
+  connectThreaded(
+    result.worker, snapshotAvailable, result, TerminalViewSession.snapshotArrived()
+  )
+  emit result.worker.beginRequested()
 
 func screenInfo*(session: TerminalViewSession): TerminexScreenInfo =
-  {.cast(noSideEffect).}:
-    locked(session):
-      result = session.storage[].session.screenInfo()
-
-func screen*(session: TerminalViewSession): CompactTerminalScreen[TerminexCell] =
-  ## Return an owned copy. Prefer screenInfo/lineAtAbsolute for small queries.
-  {.cast(noSideEffect).}:
-    locked(session):
-      result = session.storage[].session.screen()
-
+  session.cache.info
+func screen*(session: TerminalViewSession): TerminalScreenSnapshot =
+  ## An owned copy of the last received screen/history, without a worker wait.
+  session.cache
 func lineAtAbsolute*(session: TerminalViewSession, row: int): TerminexLine =
-  {.cast(noSideEffect).}:
-    locked(session):
-      result = session.storage[].session.lineAtAbsolute(row)
-
+  session.cache.lineAtAbsolute(row)
 func state*(session: TerminalViewSession): TerminexSessionState =
-  {.cast(noSideEffect).}:
-    locked(session):
-      result = session.storage[].session.state()
-
+  session.cachedState
 func running*(session: TerminalViewSession): bool =
   session.state() == tssRunning
-
 func exitCode*(session: TerminalViewSession): int =
-  {.cast(noSideEffect).}:
-    locked(session):
-      result = session.storage[].session.exitCode()
-
+  session.cachedExitCode
 func lastError*(session: TerminalViewSession): string =
-  {.cast(noSideEffect).}:
-    locked(session):
-      result = session.storage[].session.lastError()
-
+  session.cachedError
 func pendingWriteBytes*(session: TerminalViewSession): int =
-  {.cast(noSideEffect).}:
-    locked(session):
-      result = session.storage[].session.pendingWriteBytes()
-
+  session.cachedPendingWrite +
+    int(session.submittedWriteBytes - session.processedWriteBytes)
 func readLimit*(session: TerminalViewSession): int =
-  {.cast(noSideEffect).}:
-    locked(session):
-      result = session.storage[].session.readLimit()
+  session.xReadLimit
+func writeLimit*(session: TerminalViewSession): int =
+  session.xWriteLimit
 
 proc `readLimit=`*(session: TerminalViewSession, value: int) =
-  locked(session):
-    session.storage[].session.readLimit = value
-
-func writeLimit*(session: TerminalViewSession): int =
-  {.cast(noSideEffect).}:
-    locked(session):
-      result = session.storage[].session.writeLimit()
+  session.xReadLimit = max(value, 1)
+  session.submit(TerminalCommand(kind: tcReadLimit, value: value))
 
 proc `writeLimit=`*(session: TerminalViewSession, value: int) =
-  locked(session):
-    session.storage[].session.writeLimit = value
+  session.xWriteLimit = max(value, 1)
+  session.submit(TerminalCommand(kind: tcWriteLimit, value: value))
 
 proc processOutput*(session: TerminalViewSession, data: string) =
-  locked(session):
-    session.storage[].session.processOutput(data)
+  session.submit(TerminalCommand(kind: tcProcessOutput, text: data))
 
 proc write*(session: TerminalViewSession, data: string) =
-  locked(session):
-    session.storage[].session.write(data)
+  if not session.running():
+    raise newException(TerminexSessionError, "terminal session is not running")
+  if data.len == 0:
+    return
+  if session.pendingWriteBytes() + data.len > session.xWriteLimit:
+    raise newException(TerminexSessionError, "terminal input buffer is full")
+  session.submittedWriteBytes += uint64(data.len)
+  session.submit(TerminalCommand(kind: tcWrite, text: data))
 
 proc resize*(session: TerminalViewSession, columns, rows: int) =
-  locked(session):
-    session.storage[].session.resize(columns, rows)
+  if session.desiredColumns != max(columns, 1) or session.desiredRows != max(rows, 1):
+    session.desiredColumns = max(columns, 1)
+    session.desiredRows = max(rows, 1)
+    session.submit(TerminalCommand(kind: tcResize, columns: columns, rows: rows))
 
 proc clearScrollback*(session: TerminalViewSession) =
-  locked(session):
-    session.storage[].session.clearScrollback()
+  session.submit(TerminalCommand(kind: tcClearScrollback))
 
 proc takeClipboardRequest*(session: TerminalViewSession): string =
-  locked(session):
-    result = session.storage[].session.takeClipboardRequest()
+  result = move(session.clipboard)
+  session.cache.info.clipboardRequestPending = false
 
-proc sendSignal*(session: TerminalViewSession, signal: cint): bool =
-  locked(session):
-    result = session.storage[].session.sendSignal(signal)
+proc sendSignal*(session: TerminalViewSession, signal: int): bool =
+  ## True means queued for delivery, not OS success.
+  if session.running():
+    session.submit(TerminalCommand(kind: tcSignal, value: signal))
+    result = true
 
 proc interrupt*(session: TerminalViewSession): bool =
-  locked(session):
-    result = session.storage[].session.interrupt()
+  if session.running():
+    session.submit(TerminalCommand(kind: tcInterrupt))
+    result = true
 
 proc terminate*(session: TerminalViewSession): bool =
-  locked(session):
-    result = session.storage[].session.terminate()
+  if session.running():
+    session.submit(TerminalCommand(kind: tcTerminate))
+    result = true
 
 proc close*(session: TerminalViewSession) =
-  if not session.isNil:
-    locked(session):
-      session.storage[].workerToken = 0
-      session.storage[].pending = default(TerminexPollResult)
-      session.storage[].notificationPending = false
-      session.storage[].session.close()
+  ## Immediately marks the facade closed; the worker then terminates and reaps
+  ## the process. pendingCommands() reaches zero after that work is acknowledged.
+  if not session.isNil and session.cachedState != tssClosed:
+    inc session.epoch
+    session.pending = default(TerminexPollResult)
+    session.notificationPending = false
+    session.outputClosed = false
+    session.cachedState = tssClosed
+    session.submit(TerminalCommand(kind: tcClose))
 
 proc start*(session: TerminalViewSession, options = initTerminalSpawnOptions()) =
-  locked(session):
-    session.storage[].workerToken = 0
-    session.storage[].pending = default(TerminexPollResult)
-    session.storage[].notificationPending = false
-    session.storage[].outputClosed = false
-    session.storage[].session.start(options)
+  ## Queue process startup. Failures arrive through state() and lastError().
+  session.collectSnapshots()
+  if session.running():
+    raise newException(TerminexSessionError, "terminal session is already running")
+  inc session.epoch
+  session.pending = default(TerminexPollResult)
+  session.notificationPending = false
+  session.outputClosed = false
+  session.cachedState = tssRunning
+  session.cachedError.setLen(0)
+  session.submit(TerminalCommand(kind: tcStart, options: options))
+
+proc spawnTerminalViewSession*(
+    options = initTerminalSpawnOptions(),
+    columns = 80,
+    rows = 24,
+    maxScrollback = 10_000,
+): TerminalViewSession =
+  result = newTerminalViewSession(columns, rows, maxScrollback)
+  result.start(options)
 
 proc viewportSnapshot*(
     session: TerminalViewSession,
     scrollPosition: float32,
     previousLinesAdded, previousResetCount: uint64,
 ): TerminalViewportSnapshot =
-  locked(session):
-    result.info = session.storage[].session.screenInfo()
-    result.workerToken = session.storage[].workerToken
-    result.readSerial = session.storage[].readSerial
-    let info = result.info
-    if info.scrollbackResetCount == previousResetCount:
-      result.scrollPosition = scrollPosition
-      if scrollPosition > 0:
-        result.scrollPosition += (info.scrollbackLinesAdded - previousLinesAdded).float32
-      result.scrollPosition =
-        clamp(result.scrollPosition, 0.0'f32, info.scrollbackCount.float32)
-    result.start =
-      max(info.totalLineCount - info.rows - int(ceil(result.scrollPosition)), 0)
-    result.lines = newSeqOfCap[TerminexLine](info.rows)
-    for row in 0 ..< info.rows:
-      result.lines.add session.storage[].session.lineAtAbsolute(result.start + row)
+  result.info = session.screenInfo()
+  result.workerToken = session.token
+  result.readSerial = session.readSerial
+  let info = result.info
+  if info.scrollbackResetCount == previousResetCount:
+    result.scrollPosition = scrollPosition
+    if scrollPosition > 0:
+      result.scrollPosition += (info.scrollbackLinesAdded - previousLinesAdded).float32
+    result.scrollPosition =
+      clamp(result.scrollPosition, 0.0'f32, info.scrollbackCount.float32)
+  result.start =
+    max(info.totalLineCount - info.rows - int(ceil(result.scrollPosition)), 0)
+  for row in 0 ..< info.rows:
+    result.lines.add session.lineAtAbsolute(result.start + row)
 
-proc workerHandle*(session: TerminalViewSession): TerminalSessionHandle =
-  if not session.isNil and session.storage[].workerAllowed:
-    result = session.storage
-
-proc prepareWorker*(handle: TerminalSessionHandle, token: uint64): bool =
-  if not handle.isNil:
-    withSessionLock(handle):
-      if handle[].session.running() and handle[].workerToken == 0:
-        handle[].workerToken = token
-        handle[].notificationPending = false
-        handle[].pending = default(TerminexPollResult)
-        handle[].outputClosed = false
-        result = true
-
-proc beginWorker*(handle: TerminalSessionHandle, token: uint64): bool =
-  if not handle.isNil:
-    withSessionLock(handle):
-      result = handle[].workerToken == token and handle[].session.running()
-
-proc endWorker*(handle: TerminalSessionHandle, token: uint64) =
-  if not handle.isNil:
-    withSessionLock(handle):
-      if handle[].workerToken == token:
-        handle[].workerToken = 0
-        handle[].notificationPending = false
-
-proc pollWorker*(
-    handle: TerminalSessionHandle, token: uint64
-): tuple[
-  polled: TerminexPollResult, notify, active, yieldToUi: bool, readSerial: uint64
-] =
-  if handle.isNil:
-    return
-  if handle[].uiWaiters.load(moAcquire) > 0 or not tryAcquire(handle[].lock):
-    result.active = true
-    result.yieldToUi = true
-    return
-  defer:
-    release(handle[].lock)
-  if handle[].workerToken == token and handle[].session.running():
-    result.active = true
-    result.polled = handle[].session.poll(timeBudget = initDuration(milliseconds = 2))
-    if result.polled.bytesRead > 0:
-      inc handle[].readSerial
-    result.readSerial = handle[].readSerial
-    handle[].outputClosed = result.polled.outputClosed
-    handle[].pending.bytesRead += result.polled.bytesRead
-    handle[].pending.screenChanged =
-      handle[].pending.screenChanged or result.polled.screenChanged
-    handle[].pending.processExited =
-      handle[].pending.processExited or result.polled.processExited
-    handle[].pending.outputClosed =
-      handle[].pending.outputClosed or result.polled.outputClosed
-    if not handle[].notificationPending and (
-      result.polled.bytesRead > 0 or result.polled.screenChanged or
-      result.polled.outputClosed or result.polled.processExited
-    ):
-      handle[].notificationPending = true
-      result.notify = true
-
-proc poll*(
-    session: TerminalViewSession, timeBudget = initDuration()
-): TerminexPollResult =
-  locked(session):
-    if session.storage[].workerToken == 0:
-      result = session.storage[].session.poll(timeBudget)
-    else:
-      result = session.storage[].pending
-      session.storage[].pending = default(TerminexPollResult)
-      session.storage[].notificationPending = false
-      if session.storage[].session.pendingWriteBytes() > 0:
-        discard session.storage[].session.flushInput()
-      # After hangup the watcher is disarmed. Maintenance may collect a child
-      # which closed its output before it exited, and retry backpressured input.
-      if session.storage[].outputClosed and not result.processExited:
-        let finalPoll = session.storage[].session.poll(timeBudget)
-        result.processExited = finalPoll.processExited
-        result.outputClosed = true
-
-when defined(posix):
-  proc masterDescriptor*(session: TerminalViewSession): cint =
-    result = -1
-    locked(session):
-      if session.storage[].session.running():
-        for name, value in fieldPairs(session.storage[].session[]):
-          when name == "xMasterFd":
-            result = value
+proc poll*(session: TerminalViewSession): TerminexPollResult =
+  ## Consume available snapshots without waiting for commands or PTY reads.
+  session.collectSnapshots()
+  result = session.pending
+  # Lifecycle state remains observable after another view/caller consumed the
+  # one-shot byte count, matching Terminex's exited-session polling contract.
+  result.processExited = session.cachedState == tssExited
+  result.outputClosed = session.outputClosed
+  session.pending = default(TerminexPollResult)
+  session.notificationPending = false

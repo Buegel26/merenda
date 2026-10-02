@@ -21,7 +21,6 @@ export terminalsessions
 const
   DefaultTerminalFontSize* = 14.0'f32
   DefaultTerminalPadding* = 4.0'f32
-  TerminalReadBudget = initDuration(milliseconds = 2)
   TerminalFrameInterval = initDuration(milliseconds = 8)
 
 type
@@ -66,7 +65,6 @@ type
     xBlinkElapsed, xMaintenanceElapsed: Duration
     xTextBlinkVisible, xCursorBlinkVisible, xBlinkActive, xHasBlinkingText: bool
     xOutputWatch: TerminalOutputWatch
-    xOutputWatchReady: bool
     xHeartbeat: Animation
     xOutputFrame: Animation
     xLastOutputFrame: MonoTime
@@ -769,16 +767,14 @@ proc synchronizeMetadata(view: TerminalView) =
     let text = view.xSession.takeClipboardRequest()
     discard generalPasteboard().replaceWithPlainText(text)
 
-proc pollTerminal(
-    view: TerminalView, timeBudget: Duration, synchronize = true
-): TerminexPollResult =
+proc pollTerminal(view: TerminalView, synchronize = true): TerminexPollResult =
   if view.isNil or view.xSession.isNil:
     return
   recordTerminalTrace("poll-start", cast[uint64](view))
   let
     session = view.xSession
     epoch = view.xOutputEpoch
-  result = session.poll(timeBudget = timeBudget)
+  result = session.poll()
   view.xOutputClosed = result.outputClosed
   recordTerminalTrace("poll-end", cast[uint64](view), result.bytesRead.uint64)
   let generation = view.xSession.screenInfo().generation
@@ -796,9 +792,9 @@ proc pollTerminal(
     emit view.terminalProcessDidExit(session.exitCode())
 
 proc poll*(view: TerminalView): TerminexPollResult =
-  ## Synchronously drain available PTY output and synchronize the rendered grid.
-  ## Attached views automatically use bounded, coalesced output frames instead.
-  view.pollTerminal(initDuration())
+  ## Consume available worker snapshots and synchronize the rendered grid.
+  ## This does not wait for queued commands or PTY reads.
+  view.pollTerminal()
 
 proc resizeToFit*(view: TerminalView) =
   if view.isNil or view.xSession.isNil:
@@ -1054,10 +1050,6 @@ proc handleTerminalRawEvent(view: TerminalView, event: MonoTextRawEvent): bool =
       view.syncTerminalScreen()
     true
 
-proc rearmTerminalOutput(view: TerminalView, token: uint64) =
-  if not view.xOutputWatch.isNil and view.xOutputWatch.token == token:
-    view.xOutputWatch.rearm()
-
 proc terminalOutputFrameDue(view: TerminalView) {.slot.} =
   # The scheduler removes the completed animation after this slot returns.
   view.xOutputFrame = nil
@@ -1085,10 +1077,9 @@ proc readTerminalOutput(view: TerminalView): bool =
     owner = view.xPollingWindow.target
     session = view.xSession
     epoch = view.xOutputEpoch
-    token = if view.xOutputWatch.isNil: 0'u64 else: view.xOutputWatch.token
   if owner.isNil or session.isNil:
     return
-  let polled = view.pollTerminal(TerminalReadBudget, synchronize = false)
+  discard view.pollTerminal(synchronize = false)
   # Metadata and process-exit callbacks may close, detach, or replace the view.
   if view.xOutputEpoch != epoch or view.xPollingWindow.target != owner or
       view.xSession != session:
@@ -1097,26 +1088,21 @@ proc readTerminalOutput(view: TerminalView): bool =
     # Callers may close the session directly while its view remains attached.
     view.stopTerminalPolling()
     return
-  view.xReadScheduled = polled.readPaused
-  if polled.readPaused:
-    return true
-  if not polled.outputClosed:
-    view.rearmTerminalOutput(token)
+  view.xReadScheduled = false
 
 proc scheduleTerminalRead(view: TerminalView) =
   if view.xPollingWindow.isNil or view.xReadScheduled:
     return
   view.xReadScheduled = true
-  let
-    weakView = view.unsafeWeakRef()
-    epoch = view.xOutputEpoch
+  var weakView: BackRef[TerminalView]
+  weakView.target = view
+  let epoch = view.xOutputEpoch
   scheduleMainThreadWork(
     proc(): bool =
-      if not weakView.isNil:
-        let current = weakView[]
+      let current = weakView.target
+      if not current.isNil:
         if current.xOutputEpoch == epoch:
-          # One bounded chunk per application frame. Continuations yield to
-          # native input, animations and rendering before draining more output.
+          # Consume the newest available snapshot before scheduling its frame.
           return current.readTerminalOutput()
   )
 
@@ -1128,30 +1114,19 @@ proc terminalOutputAvailable(view: TerminalView, token: uint64) {.slot.} =
 proc terminalWatchStarted(view: TerminalView, token: uint64) {.slot.} =
   if view.xOutputWatch.isNil or view.xOutputWatch.token != token:
     return
-  view.xOutputWatchReady = true
   view.xHeartbeat.cadence = intervalCadence(initDuration(milliseconds = 500))
-
-proc terminalWatchFailed(view: TerminalView, token: uint64) {.slot.} =
-  if view.xOutputWatch.isNil or view.xOutputWatch.token != token:
-    return
-  view.xOutputWatch.stop()
-  view.xOutputWatch = nil
-  view.xOutputWatchReady = false
-  view.xHeartbeat.cadence = everyFrameCadence()
 
 proc terminalTicked(view: TerminalView, delta: Duration) {.slot.} =
   if view.isNil:
     return
   view.xMaintenanceElapsed = view.xMaintenanceElapsed + delta
   let maintenanceDue = view.xMaintenanceElapsed >= initDuration(milliseconds = 500)
-  if not view.xOutputWatchReady or (
-    maintenanceDue and (
-      view.xOutputClosed or view.xSession.pendingWriteBytes() > 0 or
-      not view.xSession.running()
-    )
+  if maintenanceDue and (
+    view.xOutputClosed or view.xSession.pendingWriteBytes() > 0 or
+    not view.xSession.running()
   ):
-    # A healthy watcher handles output without idle PTY polling. Maintenance
-    # retries backpressured input and collects exit after an observed hangup.
+    # Only consume worker snapshots here; transport maintenance stays on the
+    # dispatcher. Direct close must still detach the view subscription.
     view.scheduleTerminalRead()
   if maintenanceDue:
     view.xMaintenanceElapsed = initDuration()
@@ -1192,7 +1167,6 @@ proc stopTerminalPolling(view: TerminalView) =
   if not view.xOutputWatch.isNil:
     view.xOutputWatch.stop()
     view.xOutputWatch = nil
-  view.xOutputWatchReady = false
   let owner = view.xPollingWindow.target
   if not owner.isNil:
     owner.disconnect(didBecomeKeyWindow, view, terminalWindowFocusChanged)
@@ -1233,7 +1207,6 @@ proc startTerminalPolling(view: TerminalView) =
   if not view.xOutputWatch.isNil:
     view.xOutputWatch.connect(terminalOutputReady, view, terminalOutputAvailable)
     view.xOutputWatch.connect(terminalOutputWatchStarted, view, terminalWatchStarted)
-    view.xOutputWatch.connect(terminalOutputWatchFailed, view, terminalWatchFailed)
     view.xOutputWatch.start()
 
 protocol TerminalViewKeyEquivalents of ResponderCommandDispatchProtocol:
