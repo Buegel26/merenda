@@ -217,7 +217,7 @@ worker output, including scrollback eviction, clear, and resize.
 ## Dependency
 
 Terminex 0.4.0 adds the optional `sigils` feature and `terminex/threaded` API used
-by NimKit. Merenda pins the extraction commit until that release is available.
+by NimKit. Merenda requires Terminex 0.4.0 or newer with that feature enabled.
 Use the requirement configured in Merenda's Atlas dependencies. The core
 `import terminex` remains independent of Sigils and works with threads disabled;
 it exposes synchronous parsing, budgeted PTY polling, and owned snapshot helpers.
