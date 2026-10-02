@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep terminal updates and animation deadlines running during native macOS menu
+  tracking and modal panels. Rearm worker wake notifications consumed by AppKit
+  so opening About does not leave terminals updating in slow chunks afterward.
 - Give terminal workers exclusive session ownership. Send commands through Sigils
   and transfer bounded, owned snapshots through RChan, removing parser mutexes
   and UI lock-priority retries. Keep parsing independent of presentation while
