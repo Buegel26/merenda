@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- Move reusable terminal sessions, Sigils commands, RChan snapshots, and the
+  dedicated worker dispatcher into Terminex 0.4.0's optional threaded adapter.
+  NimKit retains viewports, rendering, and native event-loop integration; the
+  Terminex parser, synchronous PTY API, and snapshot helpers also work without
+  Sigils or threads.
+
+- Keep terminal updates and animation deadlines running during native macOS menu
+  tracking and modal panels. Rearm worker wake notifications consumed by AppKit
+  so opening About does not leave terminals updating in slow chunks afterward.
+- Give terminal workers exclusive session ownership. Send commands through Sigils
+  and transfer bounded, owned snapshots through RChan, removing parser mutexes
+  and UI lock-priority retries. Keep parsing independent of presentation while
+  transferring only newly retained history. All view sessions use this worker
+  path, including offline parsing and Windows builds; native Windows PTY startup
+  still needs a ConPTY backend in Terminex.
+- Track deferred terminal UI callbacks with `BackRef` so queued work cannot
+  dereference a destroyed view during ORC collection.
+- Terminal view mutations are now asynchronous. Use `newTerminalViewSession()` or
+  `spawnTerminalViewSession()` instead of passing raw Terminex sessions to views.
+  Queries return the last received snapshot; `poll()` consumes available updates,
+  and `pendingCommands()` reports outstanding commands. Closing marks the facade
+  closed immediately and queues process cleanup on the worker.
+
+- Batch matching terminal glyph styles within each changed row and skip blank
+  glyphs while retaining their backgrounds and decorations. Defer frame
+  construction while the renderer is occupied, and schedule the first terminal
+  update after idle without an extra batching delay.
+
 - Make `BackRef` a reference object with shared registrations and independent
   rebinding. Read and assign targets through `handle.target`, replacing `handle[]`.
 - Save Kosmo configuration and Tekton resource documents through checked

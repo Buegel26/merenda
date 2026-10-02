@@ -9,6 +9,7 @@ import integrations/kosmoprocesses
 import integrations/kosmocliopen
 import integrations/kosmoterminalenvironment
 import integrations/nativewindowactivation
+import integrations/nativeeventloop
 import integrations/nativewindowlifecycle
 import integrations/nativewindowrepaint
 import integrations/nativewindowscale

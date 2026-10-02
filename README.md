@@ -493,8 +493,11 @@ choices on the next launch; **Reset** restores the last saved values. You can
 also enable **Remember changes for future launches** to save each committed
 change automatically.
 
-Terminal tabs sleep on PTY readiness while idle and batch active output into
-bounded updates. For native timing measurements with `cmatrix` or `ps`, see
+Terminal tabs sleep on PTY readiness while idle. A dedicated Sigils dispatcher
+owns their sessions, reads and parses output, and accepts input and resize commands.
+The UI consumes owned RChan snapshots without waiting for the parser. This worker
+path is shared across platforms; native PTY startup currently requires POSIX.
+For native timing measurements with `cmatrix`, `ps`, or a 10,000-line burst, see
 [terminal latency diagnostics](docs/terminal-latency.md).
 
 Kosmo Settings → Moe Themes includes Catppuccin Latte, Catppuccin Mocha,
