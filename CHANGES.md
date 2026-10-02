@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Read and parse view-owned terminal sessions on a dedicated readiness worker,
+  coalescing UI notifications while continuing to drain output. Serialize input,
+  resize, and lifecycle operations with parsing, and render owned viewport
+  snapshots. Externally supplied raw Terminex sessions retain cooperative reads.
+
 - Batch matching terminal glyph styles within each changed row and skip blank
   glyphs while retaining their backgrounds and decorations. Defer frame
   construction while the renderer is occupied, and schedule the first terminal

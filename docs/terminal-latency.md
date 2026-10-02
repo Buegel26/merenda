@@ -38,11 +38,42 @@ end-to-end correlation assumes one terminal and one native window, using the
 dedicated renderer's render IDs. A fallback renderer still exposes individual
 stage timings.
 
-## Native measurements
+## Row batching and worker measurements
+
+The rendering/frame-pacing changes are isolated in `6b891cca`. On the same
+machine and Kosmo `cmatrix` workload, row batching reduced p95 frame
+construction/submission from 8.90 ms to about 2 ms. This is the main measured
+improvement for continuous animation.
+
+Comparing that commit with the separate PTY worker change:
+
+- `cmatrix` readiness-to-presentation p95 was 5.92 ms in a successful committed
+  baseline sample and 5.89 ms with the worker. The worker sample used 53.65% of
+  one CPU core during animation; idle samples remained around 2%.
+- A paired `ps` sample measured p95 11.51 ms versus 12.43 ms. Moving these small
+  reads to a worker does not demonstrate a latency improvement.
+- Draining a 10,000-line burst took 117.12 ms versus 120.02 ms. The worker's
+  read-to-presentation maximum was 18.72 ms and its viewport-update maximum was
+  2.19 ms. Worker parsing can continue without UI read jobs; this sample shows
+  comparable throughput, not a throughput gain.
+
+The first worker implementation exposed unfair lock reacquisition during floods,
+delaying a viewport update by 78.31 ms. Giving waiting UI access priority reduced
+that maximum to 2.19 ms in the final burst sample. Each contended continuation
+waits 1 ms; idle samples contained no PTY reads, grid updates, or continuations.
+
+These are short three-second observations. An additional committed-baseline
+`cmatrix` run hit a 997.97 ms renderer stall, consistent with the intermittent
+presentation issue described below. Its absence in the worker sample does not
+establish that the worker fixes that issue. Presentation timings measure native
+submission, not scanout; burst CPU averages include the quiet remainder of the
+three-second observation.
+
+## Earlier native measurements
 
 Measured on an Apple M3 Pro, macOS 15.7.9, Nim 2.2.12, using the automatic Metal
 renderer. The baseline is Merenda `2e3c2cb7` with tracing added and Terminex
-`176ff0e`; the comparison uses the scheduling changes below. Both use the same
+`176ff0e`; the comparison used UI-thread read budgets and coalesced output frames. Both use the same
 probe and window sizes. Each row is one three-second sample, not a statistical
 performance guarantee. Latency is per readiness notification that produced
 output, through its first grid synchronization and presentation submission.
@@ -91,10 +122,30 @@ large output floods than to the ordinary `cmatrix` batches measured here.
 
 ## Scheduling
 
-PTY readiness queues one cooperative read job. Each application-frame drain
-gives it a 2 ms parsing budget, checked between Terminex read chunks. A chunk
-can exceed that budget; it is a cooperative bound, not a hard deadline.
-Continuations yield to native input, animations and window rendering.
+View-owned sessions read and parse output on a dedicated readiness dispatcher,
+with a 2 ms budget between Terminex read chunks. A chunk can exceed that budget;
+it is a cooperative bound, not a hard deadline. The worker rearms readiness
+without waiting for the UI, and coalesces notifications until the UI consumes the
+pending update. Timers use a separate dispatcher, so terminal floods do not
+occupy the timer thread. Healthy idle sessions perform no reads.
+
+Input, resize and lifecycle operations serialize with parsing through the
+session lock. Pending UI access has priority over another worker read. If the
+lock is occupied or a UI caller is waiting, the worker schedules a one-shot
+1 ms continuation instead of repeatedly reacquiring the lock or spinning. This
+continuation is used only during contention and is cancelled with the watch.
+The UI copies a consistent viewport under that lock and releases it before
+constructing a frame. It does not copy the scrollback on every frame.
+`worker-poll-start` to `worker-poll-end` measures worker read/parse work;
+`poll-start` to `poll-end` now measures consumption of the pending result for
+these sessions. Cumulative worker read serials are recorded with each viewport
+snapshot, so readiness-to-presentation latency includes reads incorporated into
+a frame before their coalesced notification is consumed. The serials contain no
+terminal text.
+
+Passing an externally owned raw `CompactTerminalSession` to a view retains
+cooperative UI reads, because external aliases cannot participate in the lock.
+The existing 2 ms UI read budget still applies to that path.
 
 Reading and presentation are independent. The first grid update after idle is
 scheduled immediately, with at least 8 ms between grid updates during a burst
@@ -122,6 +173,25 @@ completion cannot mark a newer submission complete. This gate avoids building
 frames merely to replace them in the renderer's latest-frame queue, without a
 new periodic idle timer.
 
+## Session API and ownership
+
+`TerminalViewSession` is now a synchronized handle, rather than a type alias for
+Terminex's raw session. `newTerminalView()` and `newTerminalView(options)` create
+worker-capable sessions. Use `newTerminalViewSession()` when constructing a
+session separately; start it through `session.start(options)`. Existing raw
+compact sessions convert to a view session and keep their UI-owned behavior.
+
+Read-only `screenInfo()` and `lineAtAbsolute()` return owned values. `screen()`
+returns an owned full-screen/history snapshot, so prefer the smaller queries for
+frequent inspection. The view's internal viewport snapshot captures metadata and
+visible rows together. Synchronous `write`, `resize`, `poll`, `close`, and signal
+operations remain available through `view.session()`.
+
+Detach, replacement and close invalidate the worker token before queued startup
+or readiness callbacks can resume reads. Final output remains in the session
+and is synchronized before process-exit notification. After hangup, the existing
+maintenance heartbeat collects a child whose exit was not yet observable.
+
 ## Dependency change
 
 This work also prepares Terminex 0.3.3 in the Atlas-managed `deps/terminex`
@@ -133,7 +203,25 @@ the PTY closes. Merenda pins the Terminex implementation commit while its
 After Terminex 0.3.3 is released, the pin can become a version requirement.
 An unmodified Terminex 0.3.2 does not provide the new API.
 
-## Validation
+## Worker validation
+
+- The normal full suite passed all four shared runners; the example bundle
+  compiled with `atlas-run tests --compile-only examples/all_compile.nim`.
+- After adding lock fairness and cumulative trace correlation, the terminal
+  output-watch, parser, session, view, and worker-shutdown suites passed all 76
+  checks with ORC and AddressSanitizer/UBSan enabled.
+- The final normal `atlas-run tests integrations` rerun also passed.
+- The full ORC sanitizer integration run found a workspace-watcher timer
+  use-after-free in Sigils reference collection during Kosmo teardown. The same
+  allocation/free stacks reproduce on `6b891cca` without the PTY worker. This is
+  an unresolved teardown defect; the full ORC sanitizer suite is not clean.
+
+Worker coverage includes a 10,000-line flood parsed without UI read jobs,
+coalesced notifications, immutable prior snapshots, cancellation before startup
+acknowledgement, detach/reattach, direct session close, final output/exit status,
+and shutdown of both readiness and timer dispatchers.
+
+## Earlier validation
 
 - Merenda's full `atlas-run tests` suite: 4/4 runners passed.
 - Terminex's full suite: 5/5 runners passed.

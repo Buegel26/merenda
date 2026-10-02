@@ -493,8 +493,9 @@ choices on the next launch; **Reset** restores the last saved values. You can
 also enable **Remember changes for future launches** to save each committed
 change automatically.
 
-Terminal tabs sleep on PTY readiness while idle and batch active output into
-bounded updates. For native timing measurements with `cmatrix` or `ps`, see
+Terminal tabs sleep on PTY readiness while idle. A dedicated worker reads and
+parses active output while the UI presents snapshots of the visible rows.
+For native timing measurements with `cmatrix`, `ps`, or a 10,000-line burst, see
 [terminal latency diagnostics](docs/terminal-latency.md).
 
 Kosmo Settings → Moe Themes includes Catppuccin Latte, Catppuccin Mocha,

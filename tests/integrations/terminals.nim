@@ -48,7 +48,8 @@ proc feed(screen: var TerminexScreen, parser: var TerminexParser, value: string)
   parser.feed(screen, value)
 
 proc pollUntilExit(
-    session: CompactTerminalSession[TerminexCell], timeout = initDuration(seconds = 3)
+    session: CompactTerminalSession[TerminexCell] | TerminalViewSession,
+    timeout = initDuration(seconds = 3),
 ): bool =
   let deadline = getMonoTime() + timeout
   while session.running() and getMonoTime() < deadline:
@@ -58,7 +59,7 @@ proc pollUntilExit(
   not session.running()
 
 proc pollUntilText(
-    session: CompactTerminalSession[TerminexCell],
+    session: CompactTerminalSession[TerminexCell] | TerminalViewSession,
     expected: string,
     timeout = initDuration(seconds = 3),
 ): bool =
@@ -94,7 +95,9 @@ proc terminalCellPoint(view: TerminalView, row, column: int): Point =
     )
   )
 
-func normalizedTerminalOutput(session: CompactTerminalSession[TerminexCell]): string =
+func normalizedTerminalOutput(
+    session: CompactTerminalSession[TerminexCell] | TerminalViewSession
+): string =
   session.screen().plainText().replace("\n", " ").splitWhitespace().join(" ")
 
 func terminalLineText(screen: TerminexScreen, row: int): string =
@@ -105,7 +108,9 @@ func terminalLineText(screen: TerminexScreen, row: int): string =
       result.add(if cell.text.len > 0: cell.text else: " ")
   result = result.strip(leading = false, trailing = true, chars = {' '})
 
-func currentTerminalLine(session: CompactTerminalSession[TerminexCell]): string =
+func currentTerminalLine(
+    session: CompactTerminalSession[TerminexCell] | TerminalViewSession
+): string =
   let screen = session.screen()
   screen.terminalLineText(screen.cursor.position.row)
 

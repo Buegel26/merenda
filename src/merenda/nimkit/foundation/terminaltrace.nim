@@ -17,12 +17,19 @@ when defined(nimkitTerminalTrace):
 
   initLock(traceLock)
 
+  proc terminalTraceTime*(): int64 =
+    getMonoTime().ticks
+
   proc recordTerminalTrace*(
-      stage: string, identity = 0'u64, detail = 0'u64
+      stage: string, identity = 0'u64, detail = 0'u64, ticks = 0'i64
   ) {.gcsafe.} =
     let event = TerminalTraceEvent(
       stage: stage,
-      ticks: getMonoTime().ticks,
+      ticks:
+        if ticks == 0:
+          getMonoTime().ticks
+        else:
+          ticks,
       thread: getThreadId(),
       identity: identity,
       detail: detail,
@@ -41,5 +48,10 @@ when defined(nimkitTerminalTrace):
       traceDropped = 0
 
 else:
-  template recordTerminalTrace*(stage: string, identity = 0'u64, detail = 0'u64) =
+  template terminalTraceTime*(): int64 =
+    0'i64
+
+  template recordTerminalTrace*(
+      stage: string, identity = 0'u64, detail = 0'u64, ticks = 0'i64
+  ) =
     discard

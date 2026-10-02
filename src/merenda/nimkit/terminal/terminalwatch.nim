@@ -1,8 +1,10 @@
-## PTY readability notifications for terminal views. Parsing stays on the UI thread.
+## PTY readiness, worker parsing, and coalesced notifications for terminal views.
 
 import sigils/core
 import terminex/[compactscrollback, termscreen, termsessions]
 import ../foundation/terminaltrace
+import ./terminalsessions
+import threading/smartptrs
 
 when defined(posix):
   import std/[posix, tables]
@@ -16,6 +18,8 @@ when defined(posix):
   type TerminalReadRegistration = object # Zero means unowned, including after a move.
     descriptorPlusOne: cint
     token: uint64
+    session: TerminalSessionHandle
+    resumeTimer: TimerCallback
     registered: bool
     armed: bool
 
@@ -32,6 +36,11 @@ when defined(posix):
   var activeReaders {.threadvar.}: Table[uint64, WeakRef[TerminalOutputReader]]
 
   proc `=destroy`(registration: TerminalReadRegistration) =
+    if not registration.resumeTimer.isNil:
+      clearTimer(registration.resumeTimer)
+    `=destroy`((addr registration).resumeTimer)
+    registration.session.endWorker(registration.token)
+    `=destroy`((addr registration).session)
     if registration.descriptorPlusOne > 0:
       let descriptor = registration.descriptorPlusOne - 1
       activeReaders.del(registration.token)
@@ -46,6 +55,7 @@ type TerminalOutputWatch* = ref object of Agent
   starting: bool
   started: bool
   stopping: bool
+  session: TerminalSessionHandle
   when defined(posix):
     reader: AgentProxy[TerminalOutputReader]
 
@@ -86,6 +96,22 @@ when defined(posix):
     let token = reader.registration.token
     reader.registration = TerminalReadRegistration(token: token)
 
+  proc arm(reader: TerminalOutputReader): bool {.gcsafe.}
+
+  proc resumeReader(data: pointer) {.gcsafe, raises: [].} =
+    let token = cast[uint64](data)
+    let reference = activeReaders.getOrDefault(token)
+    if reference.isNil:
+      return
+    let reader = reference[]
+    reader.registration.resumeTimer = nil
+    try:
+      if not reader.arm():
+        reader.closeDescriptor()
+        emit reader.readerFailed(token)
+    except Exception:
+      discard
+
   proc descriptorReady(data: pointer) {.gcsafe, raises: [].} =
     # A queued OS callback may outlive unregistration. Tokens avoid retaining
     # readers or dereferencing a pointer to an actor that has already gone away.
@@ -97,14 +123,45 @@ when defined(posix):
     if not reader.registration.armed:
       return
     reader.disarm()
-    recordTerminalTrace("ready", token)
+    let readyAt = terminalTraceTime()
     try:
-      emit reader.readerReady(token)
+      if reader.registration.session.isNil:
+        recordTerminalTrace("ready", token)
+        emit reader.readerReady(token)
+      else:
+        recordTerminalTrace("worker-poll-start", token)
+        let update = reader.registration.session.pollWorker(token)
+        recordTerminalTrace("worker-poll-end", token, update.polled.bytesRead.uint64)
+        if update.polled.bytesRead > 0:
+          recordTerminalTrace(
+            "worker-output", token, update.readSerial, ticks = readyAt
+          )
+        if update.notify:
+          recordTerminalTrace("ready", token, ticks = readyAt)
+          emit reader.readerReady(token)
+        # Read continuations stay on the worker. Readiness is rearmed even when
+        # a UI notification is outstanding; no UI round trip gates PTY draining.
+        if update.active and not update.polled.outputClosed and
+            not update.polled.processExited:
+          if update.yieldToUi:
+            recordTerminalTrace("worker-yield", token)
+            reader.registration.resumeTimer = setTimer(
+              Moment.fromNow(chronos.milliseconds(1)),
+              resumeReader,
+              cast[pointer](token),
+            )
+          elif not reader.arm():
+            reader.closeDescriptor()
+            emit reader.readerFailed(token)
     except Exception:
-      # Sigils declares Exception; nothing may escape the native callback.
-      discard
+      reader.closeDescriptor()
+      try:
+        emit reader.readerFailed(token)
+      except Exception:
+        # No exception may escape a native readiness callback.
+        discard
 
-  proc arm(reader: TerminalOutputReader): bool =
+  proc arm(reader: TerminalOutputReader): bool {.gcsafe.} =
     if reader.registration.descriptorPlusOne == 0 or not reader.registration.registered:
       return
     if reader.registration.armed:
@@ -131,6 +188,11 @@ when defined(posix):
       return
     reader.registration.registered = true
     activeReaders[token] = reader.unsafeWeakRef()
+    if not reader.registration.session.isNil and
+        not reader.registration.session.beginWorker(token):
+      reader.closeDescriptor()
+      emit reader.readerFailed(token)
+      return
     if not reader.arm():
       reader.closeDescriptor()
       emit reader.readerFailed(token)
@@ -173,7 +235,9 @@ when defined(posix):
         stoppingWatches.delete(index)
         break
 
-  proc newTerminalOutputWatch*(session: WatchedTerminalSession): TerminalOutputWatch =
+  proc newTerminalOutputWatch*[Session: WatchedTerminalSession | TerminalViewSession](
+      session: Session
+  ): TerminalOutputWatch =
     let descriptor = session.masterDescriptor()
     if descriptor < 0:
       return
@@ -190,9 +254,12 @@ when defined(posix):
         descriptorPlusOne: duplicate + 1, token: nextWatchToken
       )
     )
+    when Session is TerminalViewSession:
+      reader.registration.session = session.workerHandle()
     try:
-      result = TerminalOutputWatch(token: nextWatchToken)
-      result.reader = reader.moveToThread(nimkitTimerThread())
+      result =
+        TerminalOutputWatch(token: nextWatchToken, session: reader.registration.session)
+      result.reader = reader.moveToThread(nimkitTerminalThread())
       connectThreaded(result.reader, beginRequested, result.reader, beginReading)
       connectThreaded(result.reader, armRequested, result.reader, rearm)
       connectThreaded(result.reader, stopRequested, result.reader, stopReading)
@@ -216,21 +283,26 @@ when defined(posix):
     if not watch.isNil and not watch.reader.isNil and not watch.stopping and
         not watch.starting:
       watch.starting = true
+      if not watch.session.isNil:
+        discard watch.session.prepareWorker(watch.token)
       emit watch.reader.beginRequested()
 
   proc rearm*(watch: TerminalOutputWatch) =
-    if not watch.isNil and watch.started and not watch.stopping:
+    if not watch.isNil and watch.started and not watch.stopping and watch.session.isNil:
       emit watch.reader.armRequested()
 
   proc stop*(watch: TerminalOutputWatch) =
     if watch.isNil or watch.stopping or watch.reader.isNil:
       return
     watch.stopping = true
+    watch.session.endWorker(watch.token)
     stoppingWatches.add watch
     emit watch.reader.stopRequested()
 
 else:
-  proc newTerminalOutputWatch*(session: WatchedTerminalSession): TerminalOutputWatch =
+  proc newTerminalOutputWatch*[Session: WatchedTerminalSession | TerminalViewSession](
+      session: Session
+  ): TerminalOutputWatch =
     discard session
 
   proc start*(watch: TerminalOutputWatch) =

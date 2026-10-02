@@ -37,8 +37,9 @@ proc parseAtExit(worker: ExitParseWorker) {.slot.} =
   workerFinished.store(true, moRelease)
 
 suite "NimKit direct-import worker shutdown":
-  test "explicit shutdown joins the timer and allows repeated shutdown":
+  test "explicit shutdown joins readiness and timer dispatchers and allows repeated shutdown":
     discard nimkitTimerThread()
+    discard nimkitTerminalThread()
     shutdownNimkitBackgroundWorkers()
     shutdownNimkitBackgroundWorkers()
 

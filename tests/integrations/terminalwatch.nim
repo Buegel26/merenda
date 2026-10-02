@@ -113,6 +113,129 @@ when defined(posix):
       require session.waitForText("received:after-stop")
       check spy.ready == 2
 
+    test "worker drains a flood without UI read jobs and coalesces notifications":
+      const LineCount = 10_000
+      let session = newTerminalViewSession(columns = 60, rows = 8)
+      session.start(
+        initTerminalSpawnOptions(
+          shell = "/bin/sh",
+          command =
+            "stty -echo; printf 'worker-ready\\n'; IFS= read -r start; " &
+            "i=0; while [ $i -lt " & $LineCount & " ]; do " &
+            "printf 'worker-line\\n'; i=$((i+1)); done; printf 'worker-final\\n'; exit 9",
+        )
+      )
+      defer:
+        session.close()
+      let readyDeadline = getMonoTime() + initDuration(seconds = 5)
+      while "worker-ready" notin session.screen().plainText() and
+          getMonoTime() < readyDeadline:
+        discard session.poll()
+        discard getCurrentSigilThread().pollAll(NonBlocking)
+        sleep(1)
+      require "worker-ready" in session.screen().plainText()
+      let
+        watch = newTerminalOutputWatch(session)
+        spy = WatchSpy()
+        original = session.screen()
+      require not watch.isNil
+      defer:
+        watch.stop()
+      watch.observe(spy)
+      watch.start()
+      waitFor(spy.started == 1)
+      session.write("start\n")
+      # Pump delivery, but never poll the session or drain UI read jobs. Parsing
+      # and all read continuations must complete on the readiness worker itself.
+      waitFor(session.screenInfo().scrollbackLinesAdded == uint64(LineCount + 3 - 8))
+      waitFor(spy.ready == 1)
+      check spy.failed == 0
+      check "worker-final" in session.screen().plainText()
+      check "worker-final" notin original.plainText()
+      check session.screenInfo().scrollbackLinesAdded == uint64(LineCount + 3 - 8)
+      let update = session.poll()
+      check update.bytesRead > 100_000
+      let exitDeadline = getMonoTime() + initDuration(seconds = 5)
+      while session.running() and getMonoTime() < exitDeadline:
+        discard session.poll()
+        discard getCurrentSigilThread().pollAll(NonBlocking)
+        sleep(1)
+      require not session.running()
+      check session.exitCode() == 9
+      check not update.readPaused
+      check session.poll().bytesRead == 0
+      watch.stop()
+      waitFor(spy.stopped == 1)
+
+    test "cancelling worker startup leaves synchronous polling usable":
+      let session = newTerminalViewSession(columns = 60, rows = 8)
+      session.start(
+        initTerminalSpawnOptions(
+          shell = "/bin/sh",
+          command =
+            "stty -echo; printf 'worker-ready\\n'; while IFS= read -r line; do printf 'received:%s\\n' \"$line\"; done",
+        )
+      )
+      defer:
+        session.close()
+      let
+        watch = newTerminalOutputWatch(session)
+        spy = WatchSpy()
+      require not watch.isNil
+      watch.observe(spy)
+      watch.start()
+      watch.stop() # Cancel before pumping the queued startup acknowledgement.
+      waitFor(spy.stopped == 1)
+      session.write("after-cancel\n")
+      let deadline = getMonoTime() + initDuration(seconds = 5)
+      while "received:after-cancel" notin session.screen().plainText() and
+          getMonoTime() < deadline:
+        discard session.poll()
+        discard getCurrentSigilThread().pollAll(NonBlocking)
+        sleep(1)
+      require "received:after-cancel" in session.screen().plainText()
+
+    test "worker notifications resume after consumption and stop before detach":
+      let session = newTerminalViewSession(columns = 60, rows = 8)
+      session.start(
+        initTerminalSpawnOptions(
+          shell = "/bin/sh",
+          command =
+            "stty -echo; printf 'worker-ready\\n'; while IFS= read -r line; do printf 'received:%s\\n' \"$line\"; done",
+        )
+      )
+      defer:
+        session.close()
+      let
+        view = newTerminalView(session, frame = rect(0, 0, 640, 180))
+        window = newWindow("Worker terminal", frame = rect(0, 0, 640, 180))
+      defer:
+        view.close()
+      window.setContentView(view)
+      waitFor("worker-ready" in view.stringValue(), window)
+      session.write("first\n")
+      waitFor("received:first" in view.stringValue(), window)
+      let before = session.screenInfo().generation
+      window.setContentView(nil)
+      check window.animationScheduler().animationCount() == 0
+      session.write("detached\n")
+      let deadline = getMonoTime() + initDuration(seconds = 5)
+      while "received:detached" notin session.screen().plainText() and
+          getMonoTime() < deadline:
+        discard session.poll()
+        discard getCurrentSigilThread().pollAll(NonBlocking)
+        sleep(1)
+      require "received:detached" in session.screen().plainText()
+      check session.screenInfo().generation > before
+      window.setContentView(view)
+      check "received:detached" in view.stringValue()
+      session.write("reattached\n")
+      waitFor("received:reattached" in view.stringValue(), window)
+      session.close()
+      discard window.animationScheduler().tick(initDuration(milliseconds = 500))
+      discard drainMainThreadWork()
+      check window.animationScheduler().animationCount() == 0
+
     when defined(macosx) or defined(linux):
       test "stop and abandoned watches release their duplicated descriptors":
         discard nimkitTimerThread()
