@@ -1385,25 +1385,18 @@ proc closePopupRoot(button: PopupMenuButton) =
     root.closePopup()
 
 proc dismissPopupAndAdvanceKeyView(button: PopupMenuButton, delta: int) =
-  ## Close the whole popup tree, then advance key focus so Tab keeps working
-  ## while a popup is open. Dismissing the popup restores focus to the
-  ## responder that held it before, and focus advances from there; fall back
-  ## to advancing from the root button when nothing holds focus.
+  ## Close the whole popup tree, then advance key focus relative to the root
+  ## button so Tab cycles through the menu bar and, past its end, through the
+  ## remaining key views of the window.
   button.closePopupRoot()
   let root = button.rootPopup()
   let owner = root.ownerWindow()
   if owner.isNil:
     return
-  let restored = owner.firstResponder()
-  let view =
-    if restored.isNil or not (restored of View):
-      root
-    else:
-      View(restored)
   if delta < 0:
-    owner.selectKeyViewPrecedingView(view)
+    owner.selectKeyViewPrecedingView(root)
   else:
-    owner.selectKeyViewFollowingView(view)
+    owner.selectKeyViewFollowingView(root)
 
 proc handlePopupKeyDown(button: PopupMenuButton, event: KeyEvent): bool =
   if not button.xChildPopup.isNil and button.xChildPopup.popupOpen():

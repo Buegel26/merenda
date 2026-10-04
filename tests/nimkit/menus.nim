@@ -281,6 +281,55 @@ suite "nimkit menus":
     check not window.hasActiveTransientSession()
     check underlyingKeys == 0
 
+  test "keyboard tab cycles through the menu bar and past it":
+    let
+      window = newWindow("Menu bar tab cycle", frame = rect(0, 0, 400, 200))
+      root = newView(frame = rect(0, 0, 400, 200))
+      menu = newMenu("Bar")
+      first = newMenu("First")
+      second = newMenu("Second")
+      third = newMenu("Third")
+      items = @[newMenuItem("First"), newMenuItem("Second"), newMenuItem("Third")]
+
+    items[0].submenu = first
+    items[1].submenu = second
+    items[2].submenu = third
+    for sub in [first, second, third]:
+      discard sub.addItem(newMenuItem("One"))
+    discard menu.addItem(items[0])
+    discard menu.addItem(items[1])
+    discard menu.addItem(items[2])
+    let menuBar = newMenuBar(menu, rect(0, 0, 400, 28))
+    root.addSubview(menuBar)
+    let after = newView(frame = rect(8, 40, 200, 24))
+    after.acceptsFirstResponder = true
+    root.addSubview(after)
+    window.setContentView(root)
+    root.layoutSubtreeIfNeeded()
+
+    require menuBar.subviews().len == 3
+    let
+      firstButton = PopupMenuButton(menuBar.subviews()[0])
+      secondButton = PopupMenuButton(menuBar.subviews()[1])
+      thirdButton = PopupMenuButton(menuBar.subviews()[2])
+
+    check window.makeFirstResponder(firstButton, focusVisible = true)
+    firstButton.openPopup()
+    check firstButton.popupOpen()
+
+    check window.dispatchKeyDown(KeyEvent(key: keyTab))
+    check not firstButton.popupOpen()
+    check window.firstResponder == secondButton
+
+    check window.dispatchKeyDown(KeyEvent(key: keyTab))
+    check window.firstResponder == thirdButton
+
+    check window.dispatchKeyDown(KeyEvent(key: keyTab))
+    check window.firstResponder == after
+
+    check window.dispatchKeyDown(KeyEvent(key: keyTab, modifiers: {kmShift}))
+    check window.firstResponder == thirdButton
+
   test "shortcut checks preserve unchanged window menu entries":
     let
       app = newApplication()
