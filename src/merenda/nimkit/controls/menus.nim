@@ -1384,6 +1384,27 @@ proc closePopupRoot(button: PopupMenuButton) =
   else:
     root.closePopup()
 
+proc dismissPopupAndAdvanceKeyView(button: PopupMenuButton, delta: int) =
+  ## Close the whole popup tree, then advance key focus so Tab keeps working
+  ## while a popup is open. Dismissing the popup restores focus to the
+  ## responder that held it before, and focus advances from there; fall back
+  ## to advancing from the root button when nothing holds focus.
+  button.closePopupRoot()
+  let root = button.rootPopup()
+  let owner = root.ownerWindow()
+  if owner.isNil:
+    return
+  let restored = owner.firstResponder()
+  let view =
+    if restored.isNil or not (restored of View):
+      root
+    else:
+      View(restored)
+  if delta < 0:
+    owner.selectKeyViewPrecedingView(view)
+  else:
+    owner.selectKeyViewFollowingView(view)
+
 proc handlePopupKeyDown(button: PopupMenuButton, event: KeyEvent): bool =
   if not button.xChildPopup.isNil and button.xChildPopup.popupOpen():
     return button.xChildPopup.handlePopupKeyDown(event)
@@ -1415,6 +1436,11 @@ proc handlePopupKeyDown(button: PopupMenuButton, event: KeyEvent): bool =
       discard button.openRelativeMenuBarButton(-1)
   of keyEnter:
     button.activateItem(button.xHighlightedIndex)
+  of keyTab:
+    if kmShift in event.modifiers:
+      button.dismissPopupAndAdvanceKeyView(-1)
+    else:
+      button.dismissPopupAndAdvanceKeyView(1)
   else:
     return false
   true
@@ -1431,6 +1457,8 @@ proc popupListActions(button: PopupMenuButton): PopupListActions =
       button.scrollPopupRows(delta),
     keyDown: proc(event: KeyEvent) =
       discard button.handlePopupKeyDown(event),
+    tab: proc(delta: int) =
+      button.dismissPopupAndAdvanceKeyView(delta),
   )
 
 proc popupList(button: PopupMenuButton): PopupListView =
@@ -1760,6 +1788,12 @@ protocol PopupMenuButtonEvents of ResponderEventProtocol:
       button.openRelativeMenuBarButton(-1)
     of keyArrowRight:
       button.openRelativeMenuBarButton(1)
+    of keyTab:
+      if kmShift in event.modifiers:
+        button.dismissPopupAndAdvanceKeyView(-1)
+      else:
+        button.dismissPopupAndAdvanceKeyView(1)
+      true
     else:
       false
 
