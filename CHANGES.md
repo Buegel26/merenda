@@ -12,7 +12,8 @@
   menu bar buttons, opening each menu as focus reaches it, and continue with
   the remaining key views past the menu bar. Arrow navigation between menus
   moves key focus with the open menu, and menu bar buttons draw a focus ring
-  while they hold visible keyboard focus.
+  while they hold visible keyboard focus, resolving its color from the
+  theme's focus ring color token like the other controls.
 
 - Move reusable terminal sessions, Sigils commands, RChan snapshots, and the
   dedicated worker dispatcher into Terminex 0.4.0's optional threaded adapter.
