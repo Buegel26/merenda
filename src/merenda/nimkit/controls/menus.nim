@@ -1926,6 +1926,9 @@ proc openRelativeMenuBarButton(button: PopupMenuButton, delta: int): bool =
         if not menuBar.xOpenButton.isNil:
           menuBar.xOpenButton.closePopup()
         candidate.openPopup()
+      let owner = candidate.ownerWindow()
+      if not owner.isNil:
+        discard owner.makeFirstResponder(candidate, focusVisible = true)
       return true
     index += delta
   false

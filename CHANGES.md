@@ -10,8 +10,9 @@
   through the visible menubar order consistently, fixing Kosmo issues #129 and #130.
   Tab and Shift+Tab close the active popup and cycle key focus through the
   menu bar buttons, opening each menu as focus reaches it, and continue with
-  the remaining key views past the menu bar. Menu bar buttons draw a focus
-  ring while they hold visible keyboard focus.
+  the remaining key views past the menu bar. Arrow navigation between menus
+  moves key focus with the open menu, and menu bar buttons draw a focus ring
+  while they hold visible keyboard focus.
 
 - Move reusable terminal sessions, Sigils commands, RChan snapshots, and the
   dedicated worker dispatcher into Terminex 0.4.0's optional threaded adapter.
