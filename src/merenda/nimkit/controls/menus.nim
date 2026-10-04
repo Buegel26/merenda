@@ -1732,14 +1732,13 @@ protocol PopupMenuButtonDrawing of ViewDrawingProtocol:
         srMenuBarItem, states, id = button.styleId, classes = button.styleClasses
       )
     )
+    let absoluteFrame = context.renderRectFor(button.bounds)
     discard context.addRenderRectangle(
-      context.renderRectFor(button.bounds),
-      style.box.fill,
-      style.box.borderColor,
-      style.box.borderWidth,
-      style.box.cornerRadius,
-      style.box.shadows,
+      absoluteFrame, style.box.fill, style.box.borderColor, style.box.borderWidth,
+      style.box.cornerRadius, style.box.shadows,
     )
+    if button.isFocusVisible:
+      context.addFocusRing(absoluteFrame, style.box)
     context.addText(button.bounds.inset(style.text.insets), button.title(), style.text)
 
 protocol PopupMenuButtonEvents of ResponderEventProtocol:

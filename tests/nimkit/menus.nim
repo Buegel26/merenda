@@ -377,6 +377,44 @@ suite "nimkit menus":
     check secondButton.popupOpen()
     check window.firstResponder == secondButton
 
+  test "tabbing into the menu bar marks the focused button focus visible":
+    let
+      window = newWindow("Menu bar tab focus", frame = rect(0, 0, 400, 200))
+      root = newView(frame = rect(0, 0, 400, 200))
+      menu = newMenu("Bar")
+      first = newMenu("First")
+      second = newMenu("Second")
+      items = @[newMenuItem("First"), newMenuItem("Second")]
+
+    items[0].submenu = first
+    items[1].submenu = second
+    for sub in [first, second]:
+      discard sub.addItem(newMenuItem("One"))
+    discard menu.addItem(items[0])
+    discard menu.addItem(items[1])
+    let menuBar = newMenuBar(menu, rect(0, 0, 400, 28))
+    root.addSubview(menuBar)
+    let before = newView(frame = rect(8, 40, 200, 24))
+    before.acceptsFirstResponder = true
+    root.addSubview(before)
+    window.setContentView(root)
+    root.layoutSubtreeIfNeeded()
+
+    require menuBar.subviews().len == 2
+    let
+      firstButton = PopupMenuButton(menuBar.subviews()[0])
+      secondButton = PopupMenuButton(menuBar.subviews()[1])
+
+    check window.makeFirstResponder(before, focusVisible = true)
+    check not firstButton.isFocusVisible
+    check not secondButton.isFocusVisible
+
+    check window.dispatchKeyDown(KeyEvent(key: keyTab))
+    check window.firstResponder == firstButton
+    check firstButton.isFocusVisible
+    check not firstButton.popupOpen()
+    check not secondButton.isFocusVisible
+
   test "shortcut checks preserve unchanged window menu entries":
     let
       app = newApplication()
