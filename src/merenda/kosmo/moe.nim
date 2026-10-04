@@ -708,24 +708,33 @@ proc newKosmoEditor*(
   config.tabLine.enable = false
   if nimLspCommand.len > 0:
     config.lsp.enable = true
-    when defined(posix):
-      if kosmoLspLauncherExecutable.len > 0:
-        config.lsp.servers["nim"] = LspServerConfig(
-          command:
-            kosmoLspLauncherExecutable & " " &
-            kosmoLspChildArguments(nimLspCommand).join(" ")
-        )
+    if nimLspCommand.startsWith("tcp://"):
+      if kosmoLspLauncherExecutable.len == 0:
+        raise
+          newException(ValueError, "TCP LSP requires a Kosmo LSP launcher executable")
+      config.lsp.servers["nim"] = LspServerConfig(
+        command:
+          kosmoLspLauncherExecutable & " " &
+          kosmoLspChildArguments(nimLspCommand).join(" ")
+      )
+    else:
+      when defined(posix):
+        if kosmoLspLauncherExecutable.len > 0:
+          config.lsp.servers["nim"] = LspServerConfig(
+            command:
+              kosmoLspLauncherExecutable & " " &
+              kosmoLspChildArguments(nimLspCommand).join(" ")
+          )
+        else:
+          config.lsp.servers["nim"] = LspServerConfig(command: nimLspCommand)
       else:
         config.lsp.servers["nim"] = LspServerConfig(command: nimLspCommand)
-    else:
-      config.lsp.servers["nim"] = LspServerConfig(command: nimLspCommand)
   # Matter parsing is owned by Kosmo's asynchronous adapter. Keep Moe on its
   # built-in backend so opening, editing, and rendering never parse a live
   # buffer through Matter on the UI thread.
   config.highlight.backend = hbBuiltin
   let grammarState = kosmoMatterGrammarState()
   result = KosmoEditor(
-    editor: newEditor(config),
     temporaryBufferIds: initTable[string, BufferId](),
     nimLspCommand: nimLspCommand,
     textMateGrammars: grammarState.grammars,
@@ -738,7 +747,10 @@ proc newKosmoEditor*(
     ),
     matterLineStateVersions: initTable[BufferId, int](),
   )
-  result.workingDirectory = workingDirectory
+  result.`workingDirectory=`(workingDirectory)
+  # Moe captures the LSP workspace root during construction.
+  result.inWorkingDirectory:
+    result.editor = newEditor(config)
   result.editor.hostPopupMenus = true
   result.editor.hostCommandFilter = proc(e: Editor, command: ParsedCommand): bool =
     # Kosmo owns buffer visibility across panes, so it must perform :q's

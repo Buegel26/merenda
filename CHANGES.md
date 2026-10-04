@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Resolve the Git diff panel's key-equivalent selector explicitly so Kosmo builds
+  with Nim devel when menu and window procedures use the same name.
+
+- Let standalone Kosmo connect to a TCP LSP endpoint by setting `nimLspCommand`
+  to `tcp://host:port`, forwarding framed protocol bytes through its LSP child
+  process and closing the connection when the session ends.
+- Document Nimdex 0.1.2's `--lsp-listen` setup, default `nim ic` compiler
+  requirements, and daemon logging. Initialize LSP with the editor's project
+  directory and verify reconnects to a persistent listener with fresh sessions.
+- Route menu navigation keys to the active popup before the focused panel.
+  Keep up/down movement within the current menu and submenu, and move left/right
+  through the visible menubar order consistently, fixing Kosmo issues #129 and #130.
+  Tab and Shift+Tab close the active popup and cycle key focus through the
+  menu bar buttons, opening each menu as focus reaches it, and continue with
+  the remaining key views past the menu bar. Arrow navigation between menus
+  moves key focus with the open menu, and menu bar buttons draw a focus ring
+  while they hold visible keyboard focus, resolving its color from the
+  theme's focus ring color token like the other controls.
+- Keep Tab and Shift+Tab moving focus after combo-box and context-menu popup
+  dismissal, and preserve normal key-view traversal for popup lists without a
+  custom Tab handler.
+
 - Move reusable terminal sessions, Sigils commands, RChan snapshots, and the
   dedicated worker dispatcher into Terminex 0.4.0's optional threaded adapter.
   NimKit retains viewports, rendering, and native event-loop integration; the
