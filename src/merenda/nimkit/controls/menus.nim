@@ -1384,10 +1384,13 @@ proc closePopupRoot(button: PopupMenuButton) =
   else:
     root.closePopup()
 
+proc owningMenuBar(button: PopupMenuButton): MenuBar
+
 proc dismissPopupAndAdvanceKeyView(button: PopupMenuButton, delta: int) =
   ## Close the whole popup tree, then advance key focus relative to the root
   ## button so Tab cycles through the menu bar and, past its end, through the
-  ## remaining key views of the window.
+  ## remaining key views of the window. A menu bar button that gains focus
+  ## opens its popup, mirroring arrow navigation between menus.
   button.closePopupRoot()
   let root = button.rootPopup()
   let owner = root.ownerWindow()
@@ -1397,6 +1400,13 @@ proc dismissPopupAndAdvanceKeyView(button: PopupMenuButton, delta: int) =
     owner.selectKeyViewPrecedingView(root)
   else:
     owner.selectKeyViewFollowingView(root)
+  let next = owner.firstResponder()
+  if next.isNil or not (next of PopupMenuButton):
+    return
+  let nextButton = PopupMenuButton(next)
+  if nextButton.owningMenuBar().isNil or nextButton.popupOpen():
+    return
+  nextButton.openPopup()
 
 proc handlePopupKeyDown(button: PopupMenuButton, event: KeyEvent): bool =
   if not button.xChildPopup.isNil and button.xChildPopup.popupOpen():

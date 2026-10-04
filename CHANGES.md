@@ -9,7 +9,8 @@
   Keep up/down movement within the current menu and submenu, and move left/right
   through the visible menubar order consistently, fixing Kosmo issues #129 and #130.
   Tab and Shift+Tab close the active popup and cycle key focus through the
-  menu bar buttons, continuing with the remaining key views past the menu bar.
+  menu bar buttons, opening each menu as focus reaches it, and continue with
+  the remaining key views past the menu bar.
 
 - Move reusable terminal sessions, Sigils commands, RChan snapshots, and the
   dedicated worker dispatcher into Terminex 0.4.0's optional threaded adapter.
