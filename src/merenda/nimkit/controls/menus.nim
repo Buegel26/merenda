@@ -1737,7 +1737,7 @@ protocol PopupMenuButtonDrawing of ViewDrawingProtocol:
       absoluteFrame, style.box.fill, style.box.borderColor, style.box.borderWidth,
       style.box.cornerRadius, style.box.shadows,
     )
-    if button.isFocusVisible:
+    if button.isFocusVisible and not button.popupOpen():
       context.addFocusRing(absoluteFrame, style.box)
     context.addText(button.bounds.inset(style.text.insets), button.title(), style.text)
 
