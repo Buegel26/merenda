@@ -1,4 +1,4 @@
-version       = "0.25.5"
+version       = "0.25.6"
 author        = "Jaremy Creechley"
 description   = "Nim-native UI toolkit"
 license       = "BSD-3-Clause"
@@ -36,8 +36,8 @@ feature "uirelays":
   requires "gh:nim-lang/uirelays#688dd44"
 
 feature "kosmo":
-  # Upstream develop includes the host result hook merged in Moe PR #3332.
-  requires "gh:fox0430/moe#22c74002ff653b0d6ee88e712160d837b4850986"
+  # Host results, read/write hooks, and stable targeted buffer deletion.
+  requires "gh:fox0430/moe#2ad904c1cc70e8aa783c2533dcb8c4230fa44a48"
 
 feature "references":
   requires "https://github.com/ravynsoft/ravynos"
