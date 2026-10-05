@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Reduce Kosmo file-tree indentation to 10 points per level and make it
+  configurable with `fileTreeIndentation` in `config.json`.
+
+- Allow `addArrangedSubview` to mix views and `(view, sizingPolicy)` pairs in
+  one call.
+
+- Let the todo table example fill the available window space between its input
+  and bottom controls.
+
+- Draw checkbox focus rings outside the indicator in every theme, keeping the
+  checkmark and checkbox interior clear without increasing layout spacing.
+
+- Let custom layout callbacks assign descendant frames with the ordinary `frame`
+  setter without creating layout feedback. Changes outside layout, or to self,
+  ancestors, and unrelated views, still invalidate layout normally.
+
+- Stop repeated layout feedback in the draggable todo example by applying
+  checkbox frames as container layout output.
+
+- Keep Markdown parsing and streamed syntax highlighting working under `nim ic`
+  by using consistent Variant type IDs for threaded worker payloads.
+
+- Preserve Tekton inspector edits under `nim ic`, including string, boolean,
+  color, geometry, and invalid text payloads in the resource document.
+
 - Update Moe to `2ad904c1` and bridge its read/write hooks, asynchronous work,
   and targeted buffer deletion into Kosmo. Route hook/build output and `:jobs`
   to a reusable native document, and shell/manual/terminal commands to native
