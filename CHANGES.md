@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep Markdown code block backgrounds visible in Kosmo editor mode while
+  asynchronous highlighting catches up with typing, line edits, and undo.
+- Highlight and scroll to clicked global file-search matches in Kosmo Markdown
+  previews, including results opened while the preview is still loading.
+
 - Share smooth arrow/page keyboard scrolling across NimKit scroll containers
   and read-only text views, including Kosmo Markdown, GitHub and Git diff readers.
   Preserve editable text cursor movement and pass vertical keys through embedded
