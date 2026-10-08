@@ -147,6 +147,20 @@ proc activatePaneTab(
   group.editorView.editor.dismissCompletionPopup()
   group.editorView.editor.dismissCommandLine()
   group.pane.setContentView(document.contentView)
+  if document.contentView of KosmoTerminalView:
+    let
+      terminal = KosmoTerminalView(document.contentView)
+      weakTerminal = terminal.unsafeWeakRef()
+      weakController = controller.unsafeWeakRef()
+    terminal.observeShortcutWindow(group.window)
+    if not controller.frontend.isNil:
+      terminal.terminalInputPolicy = controller.frontend[].xTerminalInputPolicy
+    terminal.paneCommandHandler = proc(command: KosmoPaneCommand): bool =
+      if not weakController.isNil and not weakTerminal.isNil:
+        for source in weakController[].groups:
+          for current in source.documents:
+            if current.contentView == nimkit.View(weakTerminal[]):
+              return weakController[].performPaneCommand(source, command)
   group.editorView.syncTabs(group.editorView.editor.tabs())
   if not group.editorView.statusLabel.isNil:
     group.editorView.statusLabel.text = document.title
@@ -759,45 +773,51 @@ proc focusSpatialGroup(
     source: KosmoEditorGroup,
     direction: KosmoPaneCommand,
 ): bool =
+  source.workspace.layoutSubtreeIfNeeded()
   let sourceRect = source.panel.rectToView(source.panel.bounds(), source.workspace)
   let
     sourceX = sourceRect.origin.x + sourceRect.size.width * 0.5'f32
     sourceY = sourceRect.origin.y + sourceRect.size.height * 0.5'f32
+    horizontal = direction in {kpcFocusLeft, kpcFocusRight}
   var
     target: KosmoEditorGroup
-    bestScore = float32.high
+    bestDistance = float32.high
+    bestOffset = float32.high
   for candidate in controller.groups:
     if candidate == source or candidate.workspace != source.workspace:
       continue
     let candidateRect =
       candidate.panel.rectToView(candidate.panel.bounds(), candidate.workspace)
-    let
-      dx = candidateRect.origin.x + candidateRect.size.width * 0.5'f32 - sourceX
-      dy = candidateRect.origin.y + candidateRect.size.height * 0.5'f32 - sourceY
-      eligible =
-        case direction
-        of kpcFocusLeft:
-          dx < 0.0'f32
-        of kpcFocusRight:
-          dx > 0.0'f32
-        of kpcFocusAbove:
-          dy < 0.0'f32
-        of kpcFocusBelow:
-          dy > 0.0'f32
-        else:
-          false
-    if not eligible:
-      continue
-    let score =
-      case direction
-      of kpcFocusLeft, kpcFocusRight:
-        abs(dx) + abs(dy) * 0.35'f32
-      of kpcFocusAbove, kpcFocusBelow:
-        abs(dy) + abs(dx) * 0.35'f32
+    # A directional neighbor must overlap along the perpendicular axis.
+    let overlaps =
+      if horizontal:
+        candidateRect.minY < sourceRect.maxY and candidateRect.maxY > sourceRect.minY
       else:
-        float32.high
-    if score < bestScore:
-      bestScore = score
+        candidateRect.minX < sourceRect.maxX and candidateRect.maxX > sourceRect.minX
+    if not overlaps:
+      continue
+    let distance =
+      case direction
+      of kpcFocusLeft:
+        sourceRect.minX - candidateRect.maxX
+      of kpcFocusRight:
+        candidateRect.minX - sourceRect.maxX
+      of kpcFocusAbove:
+        sourceRect.minY - candidateRect.maxY
+      of kpcFocusBelow:
+        candidateRect.minY - sourceRect.maxY
+      else:
+        -1.0'f32
+    if distance < 0.0'f32:
+      continue
+    let offset =
+      if horizontal:
+        abs(candidateRect.origin.y + candidateRect.size.height * 0.5'f32 - sourceY)
+      else:
+        abs(candidateRect.origin.x + candidateRect.size.width * 0.5'f32 - sourceX)
+    if distance < bestDistance or (distance == bestDistance and offset < bestOffset):
+      bestDistance = distance
+      bestOffset = offset
       target = candidate
   controller.focusGroup(target)
 
@@ -1192,6 +1212,7 @@ proc newTerminalDocument(
     let frontend = controller.frontend[]
     terminalView.optionAsMeta = frontend.xTerminalOptionAsMeta
     terminalView.allowsLinkActivation = frontend.xTerminalLinksEnabled
+    terminalView.terminalInputPolicy = frontend.xTerminalInputPolicy
     terminalView.connect(
       nimkit.terminalHyperlinkWasActivated, frontend.xWindowLifecycle, openTerminalLink
     )

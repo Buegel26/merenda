@@ -157,7 +157,9 @@ nim r examples/quick_start.nim
 
 NimKit's larger controls handle more of the work for you. This app opens a
 Markdown file with selectable text, links, code blocks, tables, and images.
-The view handles scrolling and layout as you resize the window.
+The view handles scrolling and layout as you resize the window. Up/Down arrows
+scroll the reader, `j`/`k` select headings and paragraphs in reading order, and
+Enter expands or collapses the selected block's section.
 
 ```nim
 import std/os
@@ -427,6 +429,12 @@ matches, `Cmd/Ctrl-G` and `Shift-Cmd/Ctrl-G` for next and previous, and Escape
 to close. Editor matches scroll to the center of the pane. Enable **`.*`** in any
 content search, including terminal tabs, to use Reni regular expressions. Searches
 default to literal text; Markdown, GitHub, diff, and terminal matches ignore case.
+
+Use Up/Down arrows to scroll Markdown, GitHub and Git diff viewers. Read-only
+NimKit text views share this scrolling behavior; editable text keeps its cursor
+movement. Markdown readers also support `j`/`k` to select visible headings and
+paragraphs and Enter to expand or collapse the selected section.
+
 Diff search includes collapsed sections and loads ordinary patches within the
 viewer's size limits. Open
 oversized patches explicitly to include their contents.
@@ -552,6 +560,17 @@ The UI consumes owned RChan snapshots without waiting for the parser. This worke
 path is shared across platforms; native PTY startup currently requires POSIX.
 For native timing measurements with `cmatrix`, `ps`, or a 10,000-line burst, see
 [terminal latency diagnostics](docs/terminal-latency.md).
+
+Terminals default to **Hybrid** input: `Ctrl-W v` splits right, and
+`Ctrl-W h/j/k/l` or `Ctrl-W` followed by an arrow navigates panes. On Linux and
+Windows, `Ctrl-C` copies the terminal selection and `Ctrl-V` pastes. Prefix a
+shortcut with `Ctrl-\` to send it to the shell: `Ctrl-\ Ctrl-C` interrupts,
+and `Ctrl-\ Ctrl-W v` sends the whole pane chord. **Kosmo Settings → Terminal →
+Terminal input** switches between Hybrid and **Raw shortcuts**, which sends
+Control keys directly. The choice applies to existing terminals and saves for
+future launches as `"terminalInput": "hybrid"` or `"raw"` in
+`~/.config/kosmo/config.json`. See the [shortcut guide](src/merenda/kosmo/docs/shortcuts.md#terminal-input-policies)
+for prefix cancellation and platform details.
 
 Kosmo Settings → Moe Themes includes Catppuccin Latte, Catppuccin Mocha,
 Kanagawa Wave, One Dark, and Tokyo Night Moon. These themes are embedded in

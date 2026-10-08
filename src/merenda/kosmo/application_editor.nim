@@ -1221,54 +1221,9 @@ proc sendKeyDownToMoe(view: KosmoEditorView, keyEvent: nimkit.KeyEvent): bool =
   view.refresh()
   true
 
-proc paneCommand(event: nimkit.KeyEvent): KosmoPaneCommand =
-  let modifiers = event.modifiers
-  if modifiers - {nimkit.kmControl, nimkit.kmShift} != {}:
-    return
-  if event.key >= nimkit.keyA and event.key <= nimkit.keyZ:
-    let letter = char(ord('a') + ord(event.key) - ord(nimkit.keyA))
-    case letter
-    of 's':
-      if nimkit.kmShift notin modifiers:
-        return kpcSplitBelow
-    of 'v':
-      if nimkit.kmShift notin modifiers:
-        return kpcSplitRight
-    of 'n':
-      if nimkit.kmShift notin modifiers:
-        return kpcNewBelow
-    of 'w':
-      if nimkit.kmShift notin modifiers:
-        return kpcFocusNext
-    of 'h':
-      if nimkit.kmShift notin modifiers:
-        return kpcFocusLeft
-    of 'j':
-      if nimkit.kmShift notin modifiers:
-        return kpcFocusBelow
-    of 'k':
-      if nimkit.kmShift notin modifiers:
-        return kpcFocusAbove
-    of 'l':
-      if nimkit.kmShift notin modifiers:
-        return kpcFocusRight
-    of 'c':
-      if nimkit.kmShift notin modifiers:
-        return kpcClose
-    else:
-      discard
-    return
-  case event.key
-  of nimkit.keyEqual:
-    if nimkit.kmShift in modifiers or event.text == "+": kpcGrowHeight else: kpcEqualize
-  of nimkit.keyMinus:
-    kpcShrinkHeight
-  of nimkit.keyComma:
-    if nimkit.kmShift in modifiers or event.text == "<": kpcShrinkWidth else: kpcNone
-  of nimkit.keyDot:
-    if nimkit.kmShift in modifiers or event.text == ">": kpcGrowWidth else: kpcNone
-  else:
-    kpcNone
+proc suppressPaneShortcutText(window: nimkit.Window, event: nimkit.KeyEvent) =
+  if not window.isNil and event.awaitsCommittedText():
+    window.suppressShortcutText(event.text)
 
 proc handlePendingPaneKey(view: KosmoEditorView, event: nimkit.KeyEvent): bool =
   if not view.pendingPanePrefix:
@@ -1284,6 +1239,7 @@ proc handlePendingPaneKey(view: KosmoEditorView, event: nimkit.KeyEvent): bool =
   let command = event.paneCommand()
   if command != kpcNone and not view.tabsDelegate.dockController.isNil and
       not view.dockGroup.isNil:
+    view.dockGroup[].window.suppressPaneShortcutText(event)
     discard
       view.tabsDelegate.dockController[].performPaneCommand(view.dockGroup[], command)
     return true
@@ -1306,6 +1262,7 @@ proc handlePaneKey(editorView: KosmoEditorView, event: nimkit.KeyEvent): bool =
       return true
     let command = event.paneCommand()
     if command != kpcNone:
+      editorView.dockGroup[].window.suppressPaneShortcutText(event)
       discard editorView.tabsDelegate.dockController[].performPaneCommand(
         editorView.dockGroup[], command
       )

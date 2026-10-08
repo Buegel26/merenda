@@ -92,6 +92,9 @@ protocol ResponderEventProtocol:
 
 protocol ResponderCommandDispatchProtocol:
   method dispatchCommand*(args: TryToPerformArgs): bool {.optional.}
+  method interceptKeyEquivalent*(event: KeyEvent): bool {.optional.}
+    ## Claim focused input before window shortcut sequences are matched.
+
   method performKeyEquivalent*(event: KeyEvent): bool {.optional.}
   method validRequestorForSendType*(
     args: ValidRequestorArgs
@@ -99,6 +102,13 @@ protocol ResponderCommandDispatchProtocol:
 
 protocol UndoManagerProvider:
   method undoManager*(): Option[UndoManager] {.optional.}
+
+protocol ScrollNavigationProtocol:
+  method wantsScrollNavigation*(event: KeyEvent): bool {.optional.}
+    ## A focused reader requests scrolling after other key equivalents decline.
+
+  method scrollKey*(event: KeyEvent): bool {.optional.}
+    ## Handle a reading-navigation key when this container can scroll its axis.
 
 protocol MouseHitPolicyProtocol:
   method mouseHitPolicy*(args: MouseHitPolicyArgs): CellHitPolicy {.optional.}
