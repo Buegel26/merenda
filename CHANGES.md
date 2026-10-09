@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep `<tab>` order after splits following the visual pane layout left to
+  right: `SplitView.insertPane` now inserts the pane's view at the matching
+  subview position instead of appending it, so the window key view loop (and
+  accessibility order) matches the rendered pane order.
 - Keep `<tab>` out of Kosmo moe editor panes: from a selected etab it cycles the
   tab selection (`<shift><tab>` backwards) while keeping focus on the strip and
   falls through to the next or previous ui element at the ends, and `<return>`
