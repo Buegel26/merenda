@@ -30,10 +30,10 @@ proc `sidebarFocused=`(controller: KosmoDockController, focused: bool) =
   if controller.isNil or controller.xSidebarFocused == focused:
     return
   controller.xSidebarFocused = focused
+  if not focused:
+    return
   for group in controller.groups:
-    group.updateActivePaneIndicator(
-      group == controller.activeGroup and not controller.xSidebarFocused
-    )
+    group.updateActivePaneIndicator(false)
 
 proc showFileExplorer*(frontend: KosmoApplication): bool {.discardable.}
 proc revealActiveFile*(frontend: KosmoApplication): bool {.discardable.}
@@ -756,6 +756,21 @@ protocol KosmoEditorAppearanceObserver of nimkit.WindowAppearanceEvents:
       handler.editorView[].applyKosmoEditorStyle(appearance)
       handler.editorView[].refresh()
 
+proc containsPaneResponder(group: KosmoEditorGroup, candidate: nimkit.Responder): bool =
+  var responder = candidate
+  while not responder.isNil:
+    if responder == nimkit.Responder(group.pane):
+      return true
+    responder = responder.nextResponder()
+
+proc hasPaneFocus(group: KosmoEditorGroup): bool =
+  if group.isNil or group.window.isNil:
+    return
+  let window = group.window
+  if group.containsPaneResponder(window.firstResponder()):
+    return true
+  group.containsPaneResponder(window.fieldEditorClient())
+
 protocol KosmoEditorFocusObserver of nimkit.WindowFocusEvents:
   proc didResignKeyWindow(handler: KosmoEditorTabsHandler) {.slot.} =
     if not handler.editorView.isNil:
@@ -774,12 +789,11 @@ protocol KosmoEditorFocusObserver of nimkit.WindowFocusEvents:
     if view.dockGroup.isNil:
       return
     let group = view.dockGroup[]
-    var responder = group.window.firstResponder()
-    while not responder.isNil:
-      if responder == nimkit.Responder(group.pane):
-        controller.activateGroup(view)
-        return
-      responder = responder.nextResponder()
+    if not group.hasPaneFocus():
+      group.updateActivePaneIndicator(false)
+      return
+    controller.activateGroup(view)
+    group.updateActivePaneIndicator(true)
 
 proc stopObservingWindow(handler: KosmoEditorTabsHandler) =
   if handler.isNil or handler.appearanceWindow.isNil:
@@ -1570,6 +1584,34 @@ proc handleKosmoKeyEquivalent(view: KosmoEditorView, event: nimkit.KeyEvent): bo
     return view.sendKeyDownToMoe(event)
   false
 
+proc handleDocumentTabsKeyEquivalent(
+    view: KosmoEditorView, tabs: nimkit.DocumentTabs, event: nimkit.KeyEvent
+): bool =
+  ## Tab cycles the etab selection on the focused strip and Return enters the
+  ## editor; every other key keeps the standard widget handling. At the first
+  ## or last etab Tab falls through to the window key view traversal.
+  if view.isNil or view.tabsDelegate.isNil:
+    return
+  if event.key == nimkit.keyTab and event.modifiers - {nimkit.kmShift} == {}:
+    let next =
+      if nimkit.kmShift in event.modifiers:
+        tabs.selectedIndex() - 1
+      else:
+        tabs.selectedIndex() + 1
+    if next < 0 or next >= tabs.len():
+      return
+    view.tabsDelegate.keyboardTabbing = true
+    tabs.selectDocumentTabAtIndex(next)
+    view.tabsDelegate.keyboardTabbing = false
+    return true
+  if event.key == nimkit.keyEnter and event.modifiers == {} and not view.dockGroup.isNil:
+    let owner = view.window()
+    if owner of nimkit.Window:
+      discard nimkit.Window(owner).makeFirstResponder(
+          nimkit.Responder(view.dockGroup[].pane.contentView)
+        )
+      return true
+
 protocol KosmoEditorCommandDispatch of nimkit.ResponderCommandDispatchProtocol:
   method dispatchCommand(view: KosmoEditorView, args: nimkit.TryToPerformArgs): bool =
     if view.tabsDelegate.isNil or view.tabsDelegate.dockController.isNil:
@@ -1674,7 +1716,9 @@ protocol KosmoEditorTabsDelegate of nimkit.DocumentTabsDelegate:
     if view.syncingTabs:
       return
     if not handler.dockController.isNil and not view.dockGroup.isNil:
-      handler.dockController[].activatePaneTab(view.dockGroup[], item.identifier())
+      handler.dockController[].activatePaneTab(
+        view.dockGroup[], item.identifier(), focus = not handler.keyboardTabbing
+      )
       return
     var id: KosmoBufferId
     if item.identifier.parseTabIdentifier(id):
@@ -1823,6 +1867,12 @@ protocol KosmoEditorViewLayout of nimkit.ViewLayoutProtocol:
     if not view.searchBar.isNil:
       view.searchBar.layoutInBounds(view.bounds())
 
+## Moe editor panes are entered with Return on an etab or with a click; they
+## stay out of the window key view loop so Tab never lands inside the editor.
+protocol KosmoEditorKeyViewParticipation of nimkit.ViewProtocol:
+  method canBecomeKeyView(view: KosmoEditorView): bool =
+    false
+
 proc newKosmoEditorView*(editor = newKosmoEditor()): KosmoEditorView =
   result = KosmoEditorView(
     editor: editor,
@@ -1847,6 +1897,7 @@ proc newKosmoEditorView*(editor = newKosmoEditor()): KosmoEditorView =
   discard result.withProtocol(KosmoEditorEditingCommands)
   discard result.withProtocol(KosmoEditorCommandDispatch)
   discard result.withProtocol(KosmoEditorViewLayout)
+  discard result.withProtocol(KosmoEditorKeyViewParticipation)
   let keyEquivalentMethod: nimkit.DynamicMethod = proc(
       self: nimkit.DynamicAgent, invocation: var nimkit.Invocation
   ) =
@@ -1857,6 +1908,15 @@ proc newKosmoEditorView*(editor = newKosmoEditor()): KosmoEditorView =
   result.tabsDelegate = KosmoEditorTabsHandler(editorView: result.unsafeWeakRef())
   discard result.tabsDelegate.withProtocol(KosmoEditorTabsDelegate)
   result.documentTabs.delegate = result.tabsDelegate
+  let tabsView = result.documentTabs
+  let tabsOwner = result.unsafeWeakRef()
+  let tabsKeyMethod: nimkit.DynamicMethod = proc(
+      self: nimkit.DynamicAgent, invocation: var nimkit.Invocation
+  ) =
+    let event = invocation.argsAs(nimkit.KeyEvent)
+    let owner: KosmoEditorView = if tabsOwner.isNil: nil else: tabsOwner[]
+    invocation.setResult(handleDocumentTabsKeyEquivalent(owner, tabsView, event))
+  discard tabsView.replaceMethod(nimkitSelectors.performKeyEquivalent(), tabsKeyMethod)
   connect(
     result.editor.matterHighlightingController(),
     matterHighlightCompleted,

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Keep `<tab>` out of Kosmo moe editor panes: from a selected etab it cycles the
+  tab selection (`<shift><tab>` backwards) while keeping focus on the strip and
+  falls through to the next or previous ui element at the ends, and `<return>`
+  enters the editor. In the editor's normal mode `<tab>`/`<shift><tab>` cycle to
+  the next/previous ui element, returning to the pane's etab strip. The selected
+  etab now highlights only while its pane has keyboard focus, so cycling into
+  the menubar or another ui element outside the pane unhighlights it until the
+  pane is entered again.
 - Keep Markdown code block backgrounds visible in Kosmo editor mode while
   asynchronous highlighting catches up with typing, line edits, and undo.
 - Highlight and scroll to clicked global file-search matches in Kosmo Markdown
