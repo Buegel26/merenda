@@ -26,6 +26,8 @@ else:
   import nimkit/constraints
   import nimkit/controlfontfaces
   import nimkit/controls
+  import nimkit/cssthemes
+  import nimkit/csslayout
   import nimkit/datepickers
   import nimkit/daterangepickers
   import nimkit/diagnostics

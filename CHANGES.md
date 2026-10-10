@@ -26,6 +26,38 @@
   etab now highlights only while its pane has keyboard focus, so cycling into
   the menubar or another ui element outside the pane unhighlights it until the
   pane is entered again.
+
+- Share immutable theme storage across Theme and Appearance copies, avoiding
+  duplicated CSS rule tables and indexes in widget caches. Preserve isolated
+  builder edits and mutable copies returned by snapshot accessors.
+
+- Preserve CSS custom-property syntax until use, keeping keywords and units
+  consistent with literal declarations and native typed resources. Normalize
+  property names before validation, compile shared declarations and diagnostics
+  in one pass, and combine repeated bundled CSS blocks. Remove obsolete
+  `hasCss`, `cssMetricStates` and `cssMetricsChange` APIs; use `metricStates` and
+  `metricsChange` for state-dependent sizing.
+
+- Implement all bundled NimKit themes as embedded CSS with shared widget
+  defaults. Unify CSS and programmatic styling precedence, token names and
+  state metric invalidation; retain typed ThemeBuilder and Appearance overrides.
+  Compile typed declarations once per immutable snapshot and cache bundled
+  themes. Support two/three-stop linear gradients and composite variables in
+  padding, radii, sizes and shadows. Uniform programmatic radii now replace
+  earlier per-corner values consistently.
+
+- Add CSS theming through Stylus 0.1.5 with role/id/class/state selectors,
+  declaration-level specificity and importance, typed root variables, explicit
+  reloads, and source diagnostics. Style existing control colors, fonts, padding,
+  borders, corners, shadows and focus metrics without replacing the native theme;
+  CSS metric state changes relayout controls and preserve hover color animation.
+  Support edge pins, preferred/percentage dimensions, required min/max bounds and
+  scoped sibling/parent/self anchor equations with native solver priorities.
+  Expose more control-specific properties and StackView/GridView layout metrics.
+  Diagnose container ownership conflicts and invalid runtime targets; retain
+  finite geometry and the layout cache on failed solves and fitting measurements.
+  Include a stylesheet preview example and CSS theming guide.
+
 - Keep Markdown code block backgrounds visible in Kosmo editor mode while
   asynchronous highlighting catches up with typing, line edits, and undo.
 - Highlight and scroll to clicked global file-search matches in Kosmo Markdown
