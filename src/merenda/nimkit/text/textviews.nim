@@ -2934,6 +2934,9 @@ protocol DefaultTextViewScrollNavigation of ScrollNavigationProtocol:
     not textView.editable() and event.modifiers == {} and event.key in KeyboardScrollKeys
 
 protocol DefaultTextViewDrawing of ViewDrawingProtocol:
+  method drawsStyledBackground(textView: TextView): bool =
+    true
+
   method drawUnderlay(textView: TextView, context: DrawContext) =
     textView.updateTextContainer()
     if textView.displayTextStorage() == textView.xTextStorage and
@@ -3461,6 +3464,15 @@ protocol DefaultTextViewAccessibility of AccessibilityProtocol:
   method accessibilityBoundsForLine(textView: TextView, line: int): Rect =
     textView.rectToWindow(textView.lineBounds(line))
 
+protocol DefaultTextViewStyleLayout of ViewLayoutProtocol:
+  method layoutStyleContext(textView: TextView): StyleContext =
+    controlStyle(
+      if textView.isFieldEditor: srTextField else: srTextView,
+      textView.widgetStateSet(),
+      id = textView.styleId,
+      classes = textView.styleClasses,
+    )
+
 proc initTextViewFields*(
     textView: TextView,
     value = "",
@@ -3493,6 +3505,7 @@ proc initTextViewFields*(
   textView.xDefaultParagraphStyle = initTextParagraphStyle()
   textView.xCompletionPanel = TextCompletionPanel(selectedIndex: -1)
   textView.acceptsFirstResponder = true
+  discard textView.withProtocol(DefaultTextViewStyleLayout)
   discard textView.withProtocol(DefaultTextViewLayoutClient)
   discard textView.withProtocol(DefaultTextViewLayoutEventSlots)
   discard textView.withProtocol(DefaultTextViewAccessibility)
