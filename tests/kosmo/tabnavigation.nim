@@ -416,6 +416,89 @@ suite "Kosmo editor pane tab navigation":
     )
     check frontend.window.firstResponder() == Responder(rightTop.documentTabs)
 
+  test "<right> from a full-height pane picks the topmost pane with uneven splits":
+    let
+      root = createTempDir("merenda-kosmo-tabnav-", "")
+      filePath = root / "first.txt"
+    writeFile(filePath, "first")
+    defer:
+      removeFile(filePath)
+      removeDir(root)
+
+    let frontend = newKosmoApplication(newApplication("Kosmo Tab Navigation Test"))
+    defer:
+      frontend.close()
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.frame = rect(0, 0, 640, 480)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check frontend.openPath(filePath)
+
+    # Build the reported layout: a full-height pane on the left, the middle
+    # column split into three stacked panes and the right column split into
+    # three stacked panes.
+    check frontend.editorView.tryToPerform(actionSelector(KosmoSplitVerticalAction))
+    check frontend.editorView.tryToPerform(actionSelector(KosmoSplitVerticalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+    var panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 3
+    check panes[1].editorView.tryToPerform(actionSelector(KosmoSplitHorizontalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+    panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 4
+    check panes[2].editorView.tryToPerform(actionSelector(KosmoSplitHorizontalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+    panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 5
+    check panes[4].editorView.tryToPerform(actionSelector(KosmoSplitHorizontalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+    panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 6
+    check panes[5].editorView.tryToPerform(actionSelector(KosmoSplitHorizontalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+    panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 7
+    # Column order left to right; the middle and right columns hold a tall
+    # top pane and two shorter panes below.
+    let
+      middleTop = panes[1]
+      middleMiddle = panes[2]
+      middleBottom = panes[3]
+      rightTop = panes[4]
+      rightMiddle = panes[5]
+      rightBottom = panes[6]
+
+    # The full-height pane spans every row, so <right> must land on the
+    # topmost pane of the nearest column instead of the pane whose center is
+    # closest to the window middle.
+    check frontend.window.makeFirstResponder(panes[0].documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowRight, keyCode: keyArrowRight.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(middleTop.documentTabs)
+
+    # Short panes keep the same-row behavior.
+    check frontend.window.makeFirstResponder(middleMiddle.documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowRight, keyCode: keyArrowRight.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(rightMiddle.documentTabs)
+
+    check frontend.window.makeFirstResponder(middleBottom.documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowRight, keyCode: keyArrowRight.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(rightBottom.documentTabs)
+
+    # The right column is the rightmost one: <right> from its bottom pane has
+    # no pane neighbor and must leave the pane area entirely.
+    check frontend.window.makeFirstResponder(rightBottom.documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowRight, keyCode: keyArrowRight.ord, text: "")
+    )
+    check frontend.window.firstResponder() != Responder(rightTop.documentTabs)
+    check frontend.window.firstResponder() != Responder(rightBottom.documentTabs)
+    check frontend.window.firstResponder() != Responder(rightBottom.editorView)
+
   test "<right> from a rightmost stacked pane leaves the pane area":
     let
       root = createTempDir("merenda-kosmo-tabnav-", "")

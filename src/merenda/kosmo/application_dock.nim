@@ -787,20 +787,30 @@ proc nearerPane(
     return false
   center < bestCenter
 
+proc spanOffset(center, spanMin, spanMax: float32): float32 =
+  ## Distance from a candidate center to the source span along one axis. A
+  ## center inside the span counts as fully aligned, so a source spanning
+  ## several rows or columns ranks all covered candidates equal and the
+  ## topmost or leftmost tie-break picks the target.
+  if center < spanMin:
+    spanMin - center
+  elif center > spanMax:
+    center - spanMax
+  else:
+    0.0'f32
+
 proc spatialNeighborGroup(
     controller: KosmoDockController,
     source: KosmoEditorGroup,
     direction: KosmoPaneCommand,
 ): KosmoEditorGroup =
   ## Nearest pane in the given direction, or nil. A neighbor must overlap the
-  ## source along the perpendicular axis; ties prefer the smaller center
-  ## offset, then the topmost (horizontal) or leftmost (vertical) pane.
+  ## source along the perpendicular axis; ties prefer the candidate center
+  ## closest to the source span, then the topmost (horizontal) or leftmost
+  ## (vertical) pane.
   source.workspace.layoutSubtreeIfNeeded()
   let sourceRect = source.panel.rectToView(source.panel.bounds(), source.workspace)
-  let
-    sourceX = sourceRect.origin.x + sourceRect.size.width * 0.5'f32
-    sourceY = sourceRect.origin.y + sourceRect.size.height * 0.5'f32
-    horizontal = direction in {kpcFocusLeft, kpcFocusRight}
+  let horizontal = direction in {kpcFocusLeft, kpcFocusRight}
   var
     target: KosmoEditorGroup
     bestDistance = float32.high
@@ -839,9 +849,9 @@ proc spatialNeighborGroup(
       center = if horizontal: centerY else: centerX
       offset =
         if horizontal:
-          abs(centerY - sourceY)
+          spanOffset(centerY, sourceRect.minY, sourceRect.maxY)
         else:
-          abs(centerX - sourceX)
+          spanOffset(centerX, sourceRect.minX, sourceRect.maxX)
     if nearerPane(distance, offset, center, bestDistance, bestOffset, bestCenter):
       bestDistance = distance
       bestOffset = offset

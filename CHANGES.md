@@ -8,9 +8,10 @@
   with `<enter>`/`<down>` and tab navigation are unchanged.
 - Navigate Kosmo editor split panes with the arrow keys from a focused etab
   strip: `<right>`/`<left>` move to the nearest pane column to the right or
-  left (same row preferred, topmost or leftmost pane on ties) and exit to the
-  next/previous ui element outside the pane at the edges, while
-  `<down>`/`<up>` move within a pane column and
+  left (same row preferred, topmost or leftmost pane on ties; a pane spanning
+  several rows or columns always targets the topmost or leftmost pane of the
+  nearest column) and exit to the next/previous ui element outside the pane at
+  the edges, while `<down>`/`<up>` move within a pane column and
   do nothing when there is no vertical neighbor. Arrow keys inside editor text
   keep moving the cursor.
 - Keep `<tab>` order after splits following the visual pane layout left to
