@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep the open state during menubar arrow navigation: `<left>`/`<right>` between
+  menu bar buttons only move the highlight while the current menu is closed, and
+  open the next or previous menu while the current menu is open. Opening menus
+  with `<enter>`/`<down>` and tab navigation are unchanged.
 - Navigate Kosmo editor split panes with the arrow keys from a focused etab
   strip: `<right>`/`<left>` move to the nearest pane column to the right or
   left (same row preferred, topmost or leftmost pane on ties) and exit to the
