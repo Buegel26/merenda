@@ -1,7 +1,36 @@
-import std/[os, tempfiles, unittest]
+import std/[algorithm, os, tempfiles, unittest]
 
 import merenda/nimkit
 import merenda/kosmo/kosmo
+
+proc collectEditorPanes(view: nimkit.View, panes: var seq[KosmoEditorPane]) =
+  ## Collect the editor panes below the view in depth-first order.
+  if view of KosmoEditorPane:
+    panes.add KosmoEditorPane(view)
+  for child in view.xSubviews:
+    child.collectEditorPanes(panes)
+
+proc paneFrame(pane: KosmoEditorPane, content: nimkit.View): Rect =
+  ## Frame of the pane in content view coordinates; a pane's own frame is
+  ## relative to its parent dock panel, so ordering needs the converted one.
+  pane.rectToView(pane.bounds(), content)
+
+proc sortedEditorPanes(content: nimkit.View): seq[KosmoEditorPane] =
+  ## Editor panes below the view, sorted left to right and top to bottom by
+  ## their position in the content view.
+  var panes: seq[KosmoEditorPane]
+  collectEditorPanes(content, panes)
+  panes.sort(
+    proc(a, b: KosmoEditorPane): int =
+      let
+        first = paneFrame(a, content)
+        second = paneFrame(b, content)
+      if first.origin.x != second.origin.x:
+        cmp(first.origin.x, second.origin.x)
+      else:
+        cmp(first.origin.y, second.origin.y)
+  )
+  panes
 
 suite "Kosmo editor pane tab navigation":
   test "<tab> cycles etabs on the strip without entering the editor":
@@ -184,3 +213,252 @@ suite "Kosmo editor pane tab navigation":
     # Focusing the pane again re-highlights the selected etab.
     check frontend.window.makeFirstResponder(frontend.editorView)
     check not frontend.documentTabs.hasStyleClass(KosmoInactivePaneStyleClass)
+
+  test "<right> and <left> move between split panes and exit at the edges":
+    let
+      root = createTempDir("merenda-kosmo-tabnav-", "")
+      filePath = root / "first.txt"
+    writeFile(filePath, "first")
+    defer:
+      removeFile(filePath)
+      removeDir(root)
+
+    let frontend = newKosmoApplication(newApplication("Kosmo Tab Navigation Test"))
+    defer:
+      frontend.close()
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.frame = rect(0, 0, 640, 480)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check frontend.openPath(filePath)
+
+    # Split the pane to the right so two panes sit side by side.
+    check frontend.editorView.tryToPerform(actionSelector(KosmoSplitVerticalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+
+    let panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 2
+    let
+      left = panes[0]
+      right = panes[1]
+
+    # <right> from the left pane's strip focuses the pane to the right.
+    check frontend.window.makeFirstResponder(left.documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowRight, keyCode: keyArrowRight.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(right.documentTabs)
+
+    # <left> moves back to the left pane.
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowLeft, keyCode: keyArrowLeft.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(left.documentTabs)
+
+    # <left> at the left edge leaves the pane for the previous ui element.
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowLeft, keyCode: keyArrowLeft.ord, text: "")
+    )
+    check frontend.window.firstResponder() != Responder(left.documentTabs)
+    check frontend.window.firstResponder() != Responder(right.documentTabs)
+    check frontend.window.firstResponder() != Responder(left.editorView)
+    check frontend.window.firstResponder() != Responder(right.editorView)
+
+    # <right> from the rightmost pane leaves the pane for the next ui element.
+    check frontend.window.makeFirstResponder(right.documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowRight, keyCode: keyArrowRight.ord, text: "")
+    )
+    check frontend.window.firstResponder() != Responder(left.documentTabs)
+    check frontend.window.firstResponder() != Responder(right.documentTabs)
+
+  test "<down> and <up> move between vertically split panes and never leave the pane":
+    let
+      root = createTempDir("merenda-kosmo-tabnav-", "")
+      filePath = root / "first.txt"
+    writeFile(filePath, "first")
+    defer:
+      removeFile(filePath)
+      removeDir(root)
+
+    let frontend = newKosmoApplication(newApplication("Kosmo Tab Navigation Test"))
+    defer:
+      frontend.close()
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.frame = rect(0, 0, 640, 480)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check frontend.openPath(filePath)
+
+    # Split the pane so two panes stack vertically.
+    check frontend.editorView.tryToPerform(actionSelector(KosmoSplitHorizontalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+
+    let panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 2
+    let
+      top = panes[0]
+      bottom = panes[1]
+
+    # <down> from the top pane's strip focuses the pane below.
+    check frontend.window.makeFirstResponder(top.documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowDown, keyCode: keyArrowDown.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(bottom.documentTabs)
+
+    # <down> at the bottom edge has no pane below and stays on the strip.
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowDown, keyCode: keyArrowDown.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(bottom.documentTabs)
+
+    # <up> moves back to the pane above.
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowUp, keyCode: keyArrowUp.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(top.documentTabs)
+
+    # <up> at the top edge has no pane above and stays on the strip.
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowUp, keyCode: keyArrowUp.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(top.documentTabs)
+
+  test "<right> from a split middle column picks the pane in the same row":
+    let
+      root = createTempDir("merenda-kosmo-tabnav-", "")
+      filePath = root / "first.txt"
+    writeFile(filePath, "first")
+    defer:
+      removeFile(filePath)
+      removeDir(root)
+
+    let frontend = newKosmoApplication(newApplication("Kosmo Tab Navigation Test"))
+    defer:
+      frontend.close()
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.frame = rect(0, 0, 640, 480)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check frontend.openPath(filePath)
+
+    # Build the three-column layout with the middle and right columns split
+    # into a top and bottom pane.
+    check frontend.editorView.tryToPerform(actionSelector(KosmoSplitVerticalAction))
+    check frontend.editorView.tryToPerform(actionSelector(KosmoSplitVerticalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+    var panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 3
+    check panes[1].editorView.tryToPerform(actionSelector(KosmoSplitHorizontalAction))
+    check panes[2].editorView.tryToPerform(actionSelector(KosmoSplitHorizontalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+    panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 5
+    # Column order left to right; the middle and right columns hold a top and
+    # a bottom pane.
+    let
+      middleTop = panes[1]
+      middleBottom = panes[2]
+      rightTop = panes[3]
+      rightBottom = panes[4]
+
+    # <right> from the middle column's bottom pane stays in the same row.
+    check frontend.window.makeFirstResponder(middleBottom.documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowRight, keyCode: keyArrowRight.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(rightBottom.documentTabs)
+
+    # <right> from the middle column's top pane stays in the same row.
+    check frontend.window.makeFirstResponder(middleTop.documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowRight, keyCode: keyArrowRight.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(rightTop.documentTabs)
+
+  test "<right> from a full-height pane picks the topmost pane of the neighbor column":
+    let
+      root = createTempDir("merenda-kosmo-tabnav-", "")
+      filePath = root / "first.txt"
+    writeFile(filePath, "first")
+    defer:
+      removeFile(filePath)
+      removeDir(root)
+
+    let frontend = newKosmoApplication(newApplication("Kosmo Tab Navigation Test"))
+    defer:
+      frontend.close()
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.frame = rect(0, 0, 640, 480)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check frontend.openPath(filePath)
+
+    # Build the reported layout: a full-height pane on the left and a right
+    # column split into a top and a bottom pane.
+    check frontend.editorView.tryToPerform(actionSelector(KosmoSplitVerticalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+    let columns = frontend.contentView.sortedEditorPanes()
+    require columns.len == 2
+    check columns[1].editorView.tryToPerform(actionSelector(KosmoSplitHorizontalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+
+    let panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 3
+    let
+      left = panes[0]
+      rightTop = panes[1]
+      rightBottom = panes[2]
+
+    # Both panes of the right column are equidistant from the full-height
+    # pane, so the topmost one must win instead of leaving the choice to
+    # layout float noise.
+    check frontend.window.makeFirstResponder(left.documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowRight, keyCode: keyArrowRight.ord, text: "")
+    )
+    check frontend.window.firstResponder() == Responder(rightTop.documentTabs)
+
+  test "<right> from a rightmost stacked pane leaves the pane area":
+    let
+      root = createTempDir("merenda-kosmo-tabnav-", "")
+      filePath = root / "first.txt"
+    writeFile(filePath, "first")
+    defer:
+      removeFile(filePath)
+      removeDir(root)
+
+    let frontend = newKosmoApplication(newApplication("Kosmo Tab Navigation Test"))
+    defer:
+      frontend.close()
+    frontend.window.setContentView(frontend.contentView)
+    frontend.contentView.frame = rect(0, 0, 640, 480)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    check frontend.openPath(filePath)
+
+    # Full-height pane on the left and a right column split into a top and a
+    # bottom pane.
+    check frontend.editorView.tryToPerform(actionSelector(KosmoSplitVerticalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+    let columns = frontend.contentView.sortedEditorPanes()
+    require columns.len == 2
+    check columns[1].editorView.tryToPerform(actionSelector(KosmoSplitHorizontalAction))
+    frontend.contentView.layoutSubtreeIfNeeded()
+
+    let panes = frontend.contentView.sortedEditorPanes()
+    require panes.len == 3
+    let
+      left = panes[0]
+      rightTop = panes[1]
+      rightBottom = panes[2]
+
+    # The right column is the rightmost one: <right> from its top pane has no
+    # pane neighbor and must leave the pane area entirely instead of landing
+    # on the sibling strip below.
+    check frontend.window.makeFirstResponder(rightTop.documentTabs)
+    discard frontend.window.dispatchKeyDown(
+      KeyEvent(key: keyArrowRight, keyCode: keyArrowRight.ord, text: "")
+    )
+    check frontend.window.firstResponder() != Responder(left.documentTabs)
+    check frontend.window.firstResponder() != Responder(rightTop.documentTabs)
+    check frontend.window.firstResponder() != Responder(rightBottom.documentTabs)
+    check frontend.window.firstResponder() != Responder(left.editorView)
+    check frontend.window.firstResponder() != Responder(rightTop.editorView)
+    check frontend.window.firstResponder() != Responder(rightBottom.editorView)
