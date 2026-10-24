@@ -976,11 +976,14 @@ suite "Kosmo tab context menu":
     let menu = frontend.contentView.contextMenuIn()
     require not menu.isNil
     check menu.title == "Tab Actions"
-    require menu.items().len == 2
+    require menu.items().len == 5
     check menu.items()[0].title == "Close"
     check menu.items()[1].title == "Close others"
-    check menu.items()[0].enabled
-    check menu.items()[1].enabled
+    check menu.items()[2].isSeparatorItem()
+    check menu.items()[3].title == "Duplicate right"
+    check menu.items()[4].title == "Duplicate below"
+    for index in [0, 1, 3, 4]:
+      check menu.items()[index].enabled
     require frontend.window.dispatchKeyDown(
       KeyEvent(key: keyEscape, keyCode: keyEscape.ord)
     )
@@ -1142,5 +1145,63 @@ suite "Kosmo tab context menu":
     check not nextCloseOthers.enabled
     require frontend.window.dispatchKeyDown(
       KeyEvent(key: keyEscape, keyCode: keyEscape.ord)
+    )
+    check not frontend.window.hasActiveTransientSession()
+
+  test "the duplicate options create splits of the clicked etab":
+    let
+      root = createTempDir("kosmo-tab-context-duplicate-", "")
+      firstPath = root / "first.txt"
+      secondPath = root / "second.txt"
+    writeFile(firstPath, "first")
+    writeFile(secondPath, "second")
+    defer:
+      removeFile(firstPath)
+      removeFile(secondPath)
+      removeDir(root)
+
+    let frontend = newKosmoApplication(newApplication("Kosmo Tab Context Duplicate"))
+    defer:
+      frontend.close()
+    frontend.openContextTabs([firstPath, secondPath])
+
+    let tabs = frontend.editorView.documentTabs
+    require tabs.len == 2
+    check tabs.selectedDocumentTabItem().title == "second.txt"
+    let tabPoint = tabs.pointToWindow(tabs.documentTabRect(0).center())
+    require frontend.window.rightMouseDownAt(tabPoint)
+    let menu = frontend.contentView.contextMenuIn()
+    require not menu.isNil
+    let duplicateRight = menu.menuItemForAction("kosmo.editorTabs.duplicateRight")
+    let duplicateBelow = menu.menuItemForAction("kosmo.editorTabs.duplicateBelow")
+    require not duplicateRight.isNil
+    require not duplicateBelow.isNil
+    check duplicateRight.enabled
+    check duplicateBelow.enabled
+
+    # Duplicating the clicked etab opens it in a new split to the right and
+    # keeps the original pane's tabs.
+    require duplicateRight.perform(frontend.window)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    var groups = frontend.editorGroups()
+    require groups.len == 2
+    check groups[0].pane.documentTabs.documentTabModels().len == 2
+    check groups[1].pane.documentTabs.documentTabModels().len == 1
+    check groups[1].pane.documentTabs.documentTabModels()[0].title == "first.txt"
+    check groups[1].pane.documentTabs.selectedDocumentTabItem().title == "first.txt"
+    check groups[0].pane.documentTabs.selectedDocumentTabItem().title == "second.txt"
+
+    # Duplicating below opens another split of the same etab below its pane.
+    require duplicateBelow.perform(frontend.window)
+    frontend.contentView.layoutSubtreeIfNeeded()
+    groups = frontend.editorGroups()
+    require groups.len == 3
+    check groups[0].pane.documentTabs.documentTabModels().len == 2
+    check groups[1].pane.documentTabs.documentTabModels()[0].title == "first.txt"
+    check groups[2].pane.documentTabs.documentTabModels()[0].title == "first.txt"
+    check groups[2].pane.documentTabs.selectedDocumentTabItem().title == "first.txt"
+    check frontend.editorView.editor.tabs().len == 2
+    discard frontend.window.clickAt(
+      tabs.pointToWindow(initPoint(tabs.bounds().maxX - 4.0'f32, 17.0'f32))
     )
     check not frontend.window.hasActiveTransientSession()

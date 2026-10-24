@@ -2,11 +2,13 @@
 
 ## Unreleased
 
-- Add a right click menu to Kosmo's editor tabs with Close and Close others
-  actions. Right clicking an etab pops a menu anchored at the tab; Close runs the
-  standard close flow for the clicked tab and Close others closes every other
-  editor tab of every pane while keeping the clicked one. Clicks outside a tab
-  keep the standard dispatch.
+- Add a right click menu to Kosmo's editor tabs with Close, Close others, and
+  Duplicate right and Duplicate below actions. Right clicking an etab pops a menu
+  anchored at the tab; Close runs the standard close flow for the clicked tab,
+  Close others closes every other editor tab of every pane while keeping the
+  clicked one, and the duplicate options split the clicked etab's editor and file
+  into a new pane to the right or below. Clicks outside a tab keep the standard
+  dispatch.
 
 - Load Vulkan on demand so Kosmo can fall back to OpenGL when the driver is absent.
 

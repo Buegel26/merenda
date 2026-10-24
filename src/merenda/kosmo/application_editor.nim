@@ -92,6 +92,13 @@ proc splitCurrentPaneTab(
   position: nimkit.DockPosition,
 ): bool
 
+proc duplicatePaneTab(
+  controller: KosmoDockController,
+  source: KosmoEditorGroup,
+  identifier: string,
+  position: nimkit.DockPosition,
+): bool
+
 proc performPaneCommand(
   controller: KosmoDockController, source: KosmoEditorGroup, command: KosmoPaneCommand
 ): bool
@@ -1866,6 +1873,18 @@ proc closeTabsExcept(
       if not tabs.closeDocumentTabWithIdentifier(identifier):
         return
 
+proc duplicateTabTo(
+    handler: KosmoEditorTabsHandler,
+    view: KosmoEditorView,
+    identifier: string,
+    position: nimkit.DockPosition,
+) =
+  ## Duplicate the etab with the identifier into a new pane at the position.
+  if handler.dockController.isNil or view.dockGroup.isNil:
+    return
+  discard
+    handler.dockController[].duplicatePaneTab(view.dockGroup[], identifier, position)
+
 proc tabContextMenu(
     handler: KosmoEditorTabsHandler, item: nimkit.DocumentTabItem
 ): nimkit.Menu =
@@ -1910,6 +1929,38 @@ proc tabContextMenu(
         if not view.isNil:
           closeTabsExcept(weakHandler[], view, identifier)
     discard result.addItem(closeOthersItem)
+  let duplicatesEnabled = not handler.dockController.isNil and not view.dockGroup.isNil
+  discard result.addSeparator()
+  block:
+    let
+      rightSelector = nimkit.actionSelector("kosmo.editorTabs.duplicateRight")
+      rightItem = nimkit.newMenuItem("Duplicate right", rightSelector)
+    rightItem.validates = false
+    rightItem.enabled = duplicatesEnabled
+    rightItem.target = nimkit.newActionTarget(rightSelector) do(
+      sender: nimkit.DynamicAgent
+    ):
+      discard sender
+      if not weakHandler.isNil:
+        let view = weakHandler[].targetView()
+        if not view.isNil:
+          duplicateTabTo(weakHandler[], view, identifier, nimkit.dpRight)
+    discard result.addItem(rightItem)
+  block:
+    let
+      belowSelector = nimkit.actionSelector("kosmo.editorTabs.duplicateBelow")
+      belowItem = nimkit.newMenuItem("Duplicate below", belowSelector)
+    belowItem.validates = false
+    belowItem.enabled = duplicatesEnabled
+    belowItem.target = nimkit.newActionTarget(belowSelector) do(
+      sender: nimkit.DynamicAgent
+    ):
+      discard sender
+      if not weakHandler.isNil:
+        let view = weakHandler[].targetView()
+        if not view.isNil:
+          duplicateTabTo(weakHandler[], view, identifier, nimkit.dpBottom)
+    discard result.addItem(belowItem)
 
 protocol KosmoEditorTabsDelegate of nimkit.DocumentTabsDelegate:
   method didSelectDocumentTab(
