@@ -1831,6 +1831,86 @@ proc targetView(handler: KosmoEditorTabsHandler): KosmoEditorView =
   if not handler.editorView.isNil:
     return handler.editorView[]
 
+proc contextPaneTabs(
+    handler: KosmoEditorTabsHandler, view: KosmoEditorView
+): seq[nimkit.DocumentTabs] =
+  ## Tab strips the etab context menu acts on: every pane's strip of the dock
+  ## setup, or only the clicked strip without one.
+  if not handler.dockController.isNil:
+    for group in handler.dockController[].groups:
+      if not group.isNil and not group.editorView.isNil and
+          not group.editorView.documentTabs.isNil:
+        result.add group.editorView.documentTabs
+    return
+  if not view.documentTabs.isNil:
+    result.add view.documentTabs
+
+proc otherEditorTabsRemain(
+    handler: KosmoEditorTabsHandler, view: KosmoEditorView, keepIdentifier: string
+): bool =
+  ## True when a pane still shows an etab other than the clicked one.
+  for tabs in contextPaneTabs(handler, view):
+    for identifier in tabs.documentTabIdentifiers():
+      if tabs != view.documentTabs or identifier != keepIdentifier:
+        return true
+
+proc closeTabsExcept(
+    handler: KosmoEditorTabsHandler, view: KosmoEditorView, keepIdentifier: string
+) =
+  ## Close every other editor tab of every pane, stopping when the standard
+  ## close flow rejects a tab, for example a cancelled save confirmation.
+  for tabs in contextPaneTabs(handler, view):
+    for identifier in tabs.documentTabIdentifiers():
+      if tabs == view.documentTabs and identifier == keepIdentifier:
+        continue
+      if not tabs.closeDocumentTabWithIdentifier(identifier):
+        return
+
+proc tabContextMenu(
+    handler: KosmoEditorTabsHandler, item: nimkit.DocumentTabItem
+): nimkit.Menu =
+  ## Build actions for the clicked etab, retaining its identifier while the
+  ## menu is open.
+  if item.isNil or item.identifier().len == 0:
+    return
+  let view = handler.targetView()
+  if view.isNil:
+    return
+  let
+    weakHandler = handler.unsafeWeakRef()
+    identifier = item.identifier()
+  result = nimkit.newMenu("Tab Actions")
+  block:
+    let
+      closeSelector = nimkit.actionSelector("kosmo.editorTabs.close")
+      closeItem = nimkit.newMenuItem("Close", closeSelector)
+    closeItem.validates = false
+    closeItem.enabled = item.closeable()
+    closeItem.target = nimkit.newActionTarget(closeSelector) do(
+      sender: nimkit.DynamicAgent
+    ):
+      discard sender
+      if not weakHandler.isNil:
+        let view = weakHandler[].targetView()
+        if not view.isNil:
+          discard view.documentTabs.closeDocumentTabWithIdentifier(identifier)
+    discard result.addItem(closeItem)
+  block:
+    let
+      closeOthersSelector = nimkit.actionSelector("kosmo.editorTabs.closeOthers")
+      closeOthersItem = nimkit.newMenuItem("Close others", closeOthersSelector)
+    closeOthersItem.validates = false
+    closeOthersItem.enabled = otherEditorTabsRemain(handler, view, identifier)
+    closeOthersItem.target = nimkit.newActionTarget(closeOthersSelector) do(
+      sender: nimkit.DynamicAgent
+    ):
+      discard sender
+      if not weakHandler.isNil:
+        let view = weakHandler[].targetView()
+        if not view.isNil:
+          closeTabsExcept(weakHandler[], view, identifier)
+    discard result.addItem(closeOthersItem)
+
 protocol KosmoEditorTabsDelegate of nimkit.DocumentTabsDelegate:
   method didSelectDocumentTab(
       handler: KosmoEditorTabsHandler,
@@ -1879,6 +1959,20 @@ protocol KosmoEditorTabsDelegate of nimkit.DocumentTabsDelegate:
       if tab.id == id and tab.temporary and tab.filePath.isSome:
         discard view.openFile(tab.filePath.get)
         return
+
+  method didRightClickDocumentTab(
+      handler: KosmoEditorTabsHandler,
+      tabs: nimkit.DocumentTabs,
+      item: nimkit.DocumentTabItem,
+      event: nimkit.MouseEvent,
+  ): bool =
+    let view = handler.targetView()
+    if view.isNil or view.syncingTabs:
+      return false
+    let menu = tabContextMenu(handler, item)
+    if menu.isNil:
+      return false
+    not menu.popUpContextMenu(tabs, event).isNil
 
   method shouldCloseDocumentTab(
       handler: KosmoEditorTabsHandler,

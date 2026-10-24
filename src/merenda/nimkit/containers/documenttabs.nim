@@ -141,6 +141,12 @@ protocol DocumentTabsDelegate {.selectorScope: protocol.}:
     tabs: DocumentTabs, item: DocumentTabItem
   ) {.optional.}
 
+  method didRightClickDocumentTab*(
+    tabs: DocumentTabs, item: DocumentTabItem, event: MouseEvent
+  ): bool {.optional.}
+    ## Reports whether a right click on the tab was handled, for example by
+    ## showing a context menu. Returning false keeps the standard dispatch.
+
   method shouldCloseDocumentTab*(
     tabs: DocumentTabs, item: DocumentTabItem, index: int
   ): bool {.optional.}
@@ -1287,6 +1293,11 @@ proc closeDocumentTab*(
 ): bool {.discardable.} =
   tabs.closeDocumentTabAtIndex(tabs.indexOfDocumentTabItem(item))
 
+proc closeDocumentTabWithIdentifier*(
+    tabs: DocumentTabs, identifier: string
+): bool {.discardable.} =
+  tabs.closeDocumentTabAtIndex(tabs.indexOfDocumentTabIdentifier(identifier))
+
 proc removeAllDocumentTabs*(tabs: DocumentTabs) =
   tabs.xTabModels.setLen(0)
   tabs.xUsesTabModels = false
@@ -1913,6 +1924,22 @@ protocol DocumentTabsEventsProtocol of ResponderEventProtocol:
       true
     else:
       false
+
+  method rightMouseDown(tabs: DocumentTabs, event: MouseEvent): bool =
+    ## Offer the clicked tab to the delegate for right click actions such as a
+    ## context menu. Clicks outside a tab keep the standard dispatch.
+    let hit = tabs.hitPart(event.location)
+    if hit.index < 0 or not tabs.xItems[hit.index].enabled():
+      return false
+    let delegate = tabs.delegate()
+    if delegate.isNil:
+      return false
+    delegate
+      .trySendLocal(
+        didRightClickDocumentTab(),
+        (tabs: tabs, item: tabs.xItems[hit.index], event: event),
+      )
+      .get(false)
 
   method mouseDragged(tabs: DocumentTabs, event: MouseEvent): bool =
     if tabs.xPressedIndex < 0:
