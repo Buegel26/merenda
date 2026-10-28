@@ -27,9 +27,11 @@ DarkBSD is the default.
 
 You'll need Nim 2.2.6 or newer, a C compiler, Git, and
 [Atlas](https://github.com/nim-lang/atlas#installation) to install the Nim
-dependencies. On Linux and FreeBSD, you'll also need the system libraries for
-your windowing and graphics backend; Merenda uses Siwin for windows and FigDraw
-for rendering.
+dependencies. Use a current Atlas release: the Atlas 0.14 bundled with Nim
+2.2.12 cannot read `merenda.nimble` or the `-u` flag used below; Atlas 0.16.3
+works. On Linux and FreeBSD, you'll also need the system libraries for your
+windowing and graphics backend; Merenda uses Siwin for windows and FigDraw for
+rendering.
 
 To try the examples, clone the repository and run the controls showcase:
 

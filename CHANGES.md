@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document that installing dependencies needs a newer Atlas than the one bundled
+  with Nim 2.2.12.
 - Pin FigDraw to release 0.46.2 and build bundled HarfBuzz/FriBidi libraries
   with Zig for static Linux musl releases.
 - Open a pull request's base-to-head comparison in Kosmo from its GitHub view.
