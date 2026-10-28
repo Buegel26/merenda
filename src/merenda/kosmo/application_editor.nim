@@ -1234,9 +1234,13 @@ proc closeTabWithConfirmation(
     view: KosmoEditorView,
     group: KosmoEditorGroup,
     id: KosmoBufferId,
+    afterClose: proc() {.closure.} = nil,
 ): bool =
   if not controller.bufferHasUnsavedData(id):
-    return view.closeTab(id).closed
+    result = view.closeTab(id).closed
+    if result and not afterClose.isNil:
+      afterClose()
+    return
   discard controller.presentUnsavedChangesConfirmation(
     group.window,
     proc() =
@@ -1246,6 +1250,8 @@ proc closeTabWithConfirmation(
         # tab strip has not performed its normal removal and selection step.
         discard view.documentTabs.removeDocumentTabWithIdentifier(id.tabIdentifier)
         controller.finishTabClose(view)
+        if not afterClose.isNil:
+          afterClose()
     ,
   )
 
@@ -1861,17 +1867,66 @@ proc otherEditorTabsRemain(
       if tabs != view.documentTabs or identifier != keepIdentifier:
         return true
 
+proc groupForTabStrip(
+    controller: KosmoDockController, tabs: nimkit.DocumentTabs
+): KosmoEditorGroup =
+  for group in controller.groups:
+    if not group.isNil and not group.editorView.isNil and
+        group.editorView.documentTabs == tabs:
+      return group
+
+proc closeTabBatch(
+    handler: KosmoEditorTabsHandler,
+    pending: seq[tuple[tabs: nimkit.DocumentTabs, identifier: string]],
+) =
+  ## Close the given editor tabs in order. A dirty tab defers to the unsaved
+  ## changes confirmation; accepting it closes the tab and resumes the
+  ## remaining tabs, while cancelling keeps them open.
+  if handler.isNil:
+    return
+  let controller = handler.dockController
+  for index, entry in pending:
+    block route:
+      if not controller.isNil:
+        var id: KosmoBufferId
+        if entry.identifier.parseTabIdentifier(id):
+          let group = controller[].groupForTabStrip(entry.tabs)
+          if not group.isNil and not group.editorView.isNil and
+              not group.editorView.syncingTabs and
+              not controller[].bufferIsVisibleOutside(group, id) and
+              controller[].bufferHasUnsavedData(id):
+            # The close defers to the unsaved changes confirmation. Accepting
+            # it closes this tab and resumes the remaining tabs, cancelling
+            # keeps them open.
+            let
+              remaining = pending[index + 1 .. ^1]
+              weakHandler = handler.unsafeWeakRef()
+            discard controller[].closeTabWithConfirmation(
+              group.editorView,
+              group,
+              id,
+              proc() =
+                if not weakHandler.isNil:
+                  closeTabBatch(weakHandler[], remaining)
+              ,
+            )
+            return
+      if not entry.tabs.closeDocumentTabWithIdentifier(entry.identifier):
+        return
+
 proc closeTabsExcept(
     handler: KosmoEditorTabsHandler, view: KosmoEditorView, keepIdentifier: string
 ) =
-  ## Close every other editor tab of every pane, stopping when the standard
-  ## close flow rejects a tab, for example a cancelled save confirmation.
+  ## Close every other editor tab of every pane, pausing at a deferred
+  ## unsaved-changes confirmation and stopping when the standard close flow
+  ## rejects a tab, for example a cancelled save confirmation.
+  var pending: seq[tuple[tabs: nimkit.DocumentTabs, identifier: string]]
   for tabs in contextPaneTabs(handler, view):
     for identifier in tabs.documentTabIdentifiers():
       if tabs == view.documentTabs and identifier == keepIdentifier:
         continue
-      if not tabs.closeDocumentTabWithIdentifier(identifier):
-        return
+      pending.add (tabs, identifier)
+  closeTabBatch(handler, pending)
 
 proc duplicateTabTo(
     handler: KosmoEditorTabsHandler,
@@ -1884,6 +1939,13 @@ proc duplicateTabTo(
     return
   discard
     handler.dockController[].duplicatePaneTab(view.dockGroup[], identifier, position)
+
+proc dismissActionPopup(sender: nimkit.DynamicAgent) =
+  ## End the context menu session before an action that can present a modal
+  ## sheet. The popup teardown closes the owner's auxiliary windows, which
+  ## would otherwise dismiss the sheet before it can be answered.
+  if sender of nimkit.PopupMenuButton:
+    nimkit.PopupMenuButton(sender).closePopup()
 
 proc tabContextMenu(
     handler: KosmoEditorTabsHandler, item: nimkit.DocumentTabItem
@@ -1908,7 +1970,7 @@ proc tabContextMenu(
     closeItem.target = nimkit.newActionTarget(closeSelector) do(
       sender: nimkit.DynamicAgent
     ):
-      discard sender
+      dismissActionPopup(sender)
       if not weakHandler.isNil:
         let view = weakHandler[].targetView()
         if not view.isNil:
@@ -1923,7 +1985,7 @@ proc tabContextMenu(
     closeOthersItem.target = nimkit.newActionTarget(closeOthersSelector) do(
       sender: nimkit.DynamicAgent
     ):
-      discard sender
+      dismissActionPopup(sender)
       if not weakHandler.isNil:
         let view = weakHandler[].targetView()
         if not view.isNil:

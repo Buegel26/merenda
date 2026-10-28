@@ -6,9 +6,9 @@
   Duplicate right and Duplicate below actions. Right clicking an etab pops a menu
   anchored at the tab; Close runs the standard close flow for the clicked tab,
   Close others closes every other editor tab of every pane while keeping the
-  clicked one, and the duplicate options split the clicked etab's editor and file
-  into a new pane to the right or below. Clicks outside a tab keep the standard
-  dispatch.
+  clicked one and resumes after an accepted unsaved-changes confirmation, and the
+  duplicate options split the clicked etab's editor and file into a new pane to
+  the right or below. Clicks outside a tab keep the standard dispatch.
 
 - Load Vulkan on demand so Kosmo can fall back to OpenGL when the driver is absent.
 

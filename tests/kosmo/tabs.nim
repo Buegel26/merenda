@@ -67,6 +67,32 @@ proc contextMenuIn(view: View): Menu =
     if child of PopupMenuButton:
       return PopupMenuButton(child).menu()
 
+proc contextPopupIn(view: View): PopupMenuButton =
+  ## Anchor button of a transient context popup added directly to the view.
+  for child in view.subviews():
+    if child of PopupMenuButton:
+      return PopupMenuButton(child)
+
+proc buttonWithTitle(view: View, title: string): Button =
+  if view of Button and Button(view).title == title:
+    return Button(view)
+  for child in view.subviews():
+    result = child.buttonWithTitle(title)
+    if not result.isNil:
+      return
+
+func rectCenter(rect: Rect): Point =
+  initPoint(
+    rect.origin.x + rect.size.width / 2.0'f32,
+    rect.origin.y + rect.size.height / 2.0'f32,
+  )
+
+proc clickModalButton(window: Window, title: string): bool =
+  let button = window.contentView().buttonWithTitle(title)
+  if button.isNil:
+    return
+  window.clickAt(button.pointToWindow(button.bounds().rectCenter()))
+
 suite "Kosmo":
   test "recognizes conventional Markdown file extensions":
     for path in ["README.md", "guide.MARKDOWN", "notes.mkd", "manual.mdtext"]:
@@ -1205,3 +1231,93 @@ suite "Kosmo tab context menu":
       tabs.pointToWindow(initPoint(tabs.bounds().maxX - 4.0'f32, 17.0'f32))
     )
     check not frontend.window.hasActiveTransientSession()
+
+  test "close others resumes after an accepted unsaved changes confirmation":
+    let
+      root = createTempDir("kosmo-tab-context-confirm-", "")
+      keepPath = root / "keep.txt"
+      dirtyPath = root / "dirty.txt"
+      lastPath = root / "last.txt"
+    writeFile(keepPath, "keep")
+    writeFile(dirtyPath, "dirty")
+    writeFile(lastPath, "last")
+    defer:
+      removeFile(keepPath)
+      removeFile(dirtyPath)
+      removeFile(lastPath)
+      removeDir(root)
+
+    let frontend = newKosmoApplication(newApplication("Kosmo Tab Context Confirm"))
+    defer:
+      frontend.close()
+    frontend.openContextTabs([keepPath, dirtyPath, lastPath])
+
+    let tabs = frontend.editorView.documentTabs
+    require tabs.len == 3
+    # Select the middle tab and modify it so its close defers to the
+    # confirmation.
+    require frontend.window.makeFirstResponder(frontend.editorView)
+    require tabs.selectDocumentTabAtIndex(1)
+    require frontend.editorView.editor.handleKey("i")
+    require frontend.editorView.editor.handleTextInput("!")
+    require frontend.editorView.editor.handleKey("Esc")
+    check frontend.editorView.editor.tabs()[1].modified
+
+    # Close others on the first tab: the dirty tab defers to the sheet while
+    # the last tab waits for the batch to resume. Activate the item through
+    # the popup's own handling so the popup closes right after the action,
+    # exactly like a click on the item.
+    let tabPoint = tabs.pointToWindow(tabs.documentTabRect(0).center())
+    require frontend.window.rightMouseDownAt(tabPoint)
+    let popupButton = frontend.contentView.contextPopupIn()
+    require not popupButton.isNil
+    let menu = frontend.contentView.contextMenuIn()
+    require not menu.isNil
+    let closeOthers = menu.menuItemForAction("kosmo.editorTabs.closeOthers")
+    require not closeOthers.isNil
+    let othersIndex = menu.items().find(closeOthers)
+    require othersIndex == 1
+    require popupButton.dispatchPopupKeyDown(
+      KeyEvent(key: keyArrowDown, keyCode: keyArrowDown.ord)
+    )
+    require popupButton.dispatchPopupKeyDown(
+      KeyEvent(key: keyEnter, keyCode: keyEnter.ord)
+    )
+    check frontend.contentView.contextPopupIn().isNil
+
+    # Accepting the confirmation closes the dirty tab and resumes the batch.
+    let session = frontend.application.modalSession()
+    require not session.isNil
+    check session.window.title == "Unsaved Changes"
+    require session.window.clickModalButton("Discard")
+    check frontend.application.modalSession().isNil
+    check frontend.editorView.editor.tabs().len == 1
+    check frontend.editorView.editor.tabs()[0].title == "keep.txt"
+    check tabs.selectedDocumentTabItem().title == "keep.txt"
+    check frontend.editorView.editor.tabs()[0].active
+    # The menu stays open while the sheet was up; a click outside dismisses it.
+    discard frontend.window.clickAt(
+      tabs.pointToWindow(initPoint(tabs.bounds().maxX - 4.0'f32, 17.0'f32))
+    )
+    check not frontend.window.hasActiveTransientSession()
+
+    # Cancelling a confirmation stops the batch and keeps the tabs open.
+    require frontend.openPath(dirtyPath)
+    require frontend.window.makeFirstResponder(frontend.editorView)
+    require frontend.editorView.editor.handleKey("i")
+    require frontend.editorView.editor.handleTextInput("?")
+    require frontend.editorView.editor.handleKey("Esc")
+    check frontend.editorView.editor.tabs()[1].modified
+    require frontend.window.rightMouseDownAt(tabPoint)
+    let nextMenu = frontend.contentView.contextMenuIn()
+    require not nextMenu.isNil
+    let nextCloseOthers = nextMenu.menuItemForAction("kosmo.editorTabs.closeOthers")
+    require not nextCloseOthers.isNil
+    require nextCloseOthers.perform(frontend.window)
+    let cancelledSession = frontend.application.modalSession()
+    require not cancelledSession.isNil
+    require cancelledSession.window.clickModalButton("Cancel")
+    check frontend.application.modalSession().isNil
+    check frontend.editorView.editor.tabs().len == 2
+    check frontend.editorView.editor.tabs()[1].modified
+    check tabs.selectedDocumentTabItem().title == "dirty.txt"
