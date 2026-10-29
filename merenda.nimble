@@ -1,22 +1,23 @@
-version       = "0.29.3"
+version       = "0.30.0"
 author        = "Jaremy Creechley"
 description   = "Nim-native UI toolkit"
 license       = "BSD-3-Clause"
 srcDir        = "src"
 
 # Dependencies
-requires "nim >= 2.2.6"
+requires "nim >= 2.2.10"
 requires "msgpack4nim"
 requires "chronicles >= 0.4"
 requires "chroniclers >= 0.6"
 requires "crunchy >= 0.1.11"
-# Includes merged ABI/X11 fixes and opt-in nonactivating window presentation.
-requires "gh:elcritch/siwin#86f38cd4112f6254e398e9921d8f0971c3cd9720"
-requires "gh:elcritch/figdraw >= 0.46.3 [siwin, harfbuzz, textBackendHarfbuzzy]"
-requires "gh:elcritch/harfbuzzy >= 0.3.0"
-requires "gh:elcritch/sigils >= 0.32.1 [sigNameAsString, closures, siwin, chronos]"
+# Includes ABI/X11 fixes, nonactivating windows, and FigDraw's WinAPI fallback API.
+requires "siwin#5827ee9dadb5e2597db85375e0e87b8a2272174b"
+# This revision loads Vulkan lazily so a missing driver can use OpenGL.
+requires "gh:elcritch/figdraw >= 0.46.4 [siwin]"
+requires "harfbuzzy >= 0.7.0 [runtime]"
+requires "sigils >= 0.32.1 [sigNameAsString, closures, siwin, chronos]"
 requires "gh:elcritch/variant#fix/ic-type-ids"
-requires "gh:elcritch/kiwiberry#4d273da93f67d8e5d6317898851772b32fa635ec"
+requires "kiwiberry#4d273da93f67d8e5d6317898851772b32fa635ec"
 requires "cborious"
 requires "unicodedb >= 0.14.0"
 requires "faststreams >= 0.5.1"

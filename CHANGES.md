@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Load Vulkan on demand so Kosmo can fall back to OpenGL when the driver is absent.
+
+- Link MinGW runtimes statically into Windows executables and verify the release
+  executable's imports. Shared text libraries retain their bundled dependencies.
+
+- Recommend Linux text-rendering packages after installing a shared build,
+  with commands for Debian/Ubuntu, Arch, and Fedora.
+
+- Log Kosmo's selected text backend and explain missing or outdated native text libraries.
+
+- Make `nim install_kosmo` use macOS CI's runtime-loaded HarfBuzz/FriBidi
+  libraries, bundled and signed inside the app with their license notices.
+
+- Use FigDraw 0.46.3 and Harfbuzzy 0.6.0 for optional runtime text-library
+  loading. Kosmo uses HarfBuzz shaping and automatic system-font fallback when
+  supported libraries are present, and Pixie otherwise. Preserve native shaping
+  in static builds and update bundled-library overrides for macOS and Windows.
+- Switch Windows CI examples and Kosmo releases back to MinGW-w64 GCC. Bundle
+  the UCRT64 text DLLs and their dependencies, retain DWARF debug information,
+  and check startup without compiler tools on `PATH`. Update Siwin for FigDraw's
+  Windows Vulkan-to-OpenGL fallback API. Remove the private patched Nim installer
+  and its fork-specific atomics checks; Windows builds use the official compiler.
+
 ## 0.29.3
 
 - Prefer opening editor tabs in a pane not displaying a terminal, with a Kosmo
@@ -10,6 +33,8 @@
 
 - Document that installing dependencies needs a newer Atlas than the one bundled
   with Nim 2.2.12.
+- Build bundled HarfBuzz/FriBidi libraries with Zig for static Linux musl
+  releases.
 - Require FigDraw 0.46.3 or newer and update Siwin for Windows presentation,
   retaining background development windows. Build bundled HarfBuzz/FriBidi
   libraries with Zig for static Linux musl releases.

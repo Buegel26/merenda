@@ -18,7 +18,7 @@
   "src/"
 --nimcache:
   "deps/.nimcache"
-when defined(windows):
+when defined(windows) and defined(vcc):
   # Use the configured Developer shell directly; vccexe expands response files
   # into command lines that exceed Windows' limit for large applications.
   switch("vcc.exe", "cl.exe")
@@ -30,6 +30,12 @@ else:
   switch("define", "nimStackTraceOverride")
   switch("import", "libbacktrace")
 
+when defined(windows) and defined(gcc):
+  # The C linker needs libstdc++ for libbacktrace's demangler. Select the
+  # static archives explicitly: -static-libstdc++ only affects g++'s own link.
+  switch("passL", "-static-libgcc")
+  switch("passL", "-Wl,-Bstatic -lstdc++ -lwinpthread -Wl,-Bdynamic")
+
 when defined(freebsd):
   --define:
     libbacktraceUseSystemLibs
@@ -38,10 +44,22 @@ when defined(linux) and defined(gcc):
   # GCC 15 promotes Siwin's generated typed-empty-sequence pointer warning to an error.
   switch("passC", "-Wno-error=incompatible-pointer-types")
 
+# FigDraw owns Vulkan dispatch and loads the driver lazily. Disable the Vulkan
+# bindings' process-wide eager loader so missing drivers can fall back to OpenGL.
+switch("define", "vkCustomLoader")
+
 switch("define", "features.markdown.regex") # temporary hack until we get atlas 0.15.1
 
 # Give bounded TextMate regex probes room for generated native declarations.
 switch("define", "MatterTimedRegexStepLimit=100000")
+
+when not defined(figdrawTextBackend):
+  when defined(harfbuzzyStatic) or defined(features.harfbuzzy.static):
+    # FigDraw defaults static builds to Pixie; retain shaping in bundled builds.
+    switch("define", "figdrawTextBackend=harfbuzzy")
+  else:
+    # Atlas -k can retain the old textBackendHarfbuzzy feature after an upgrade.
+    switch("define", "figdrawTextBackend=runtime")
 
 when defined(features.merenda.kosmo):
   switch("define", "moe.embedded")
