@@ -1321,3 +1321,73 @@ suite "Kosmo tab context menu":
     check frontend.editorView.editor.tabs().len == 2
     check frontend.editorView.editor.tabs()[1].modified
     check tabs.selectedDocumentTabItem().title == "dirty.txt"
+
+  test "close others keeps a dirty tab when closing is disabled":
+    let
+      root = createTempDir("kosmo-tab-context-eligibility-", "")
+      keepPath = root / "keep.txt"
+      dirtyPath = root / "dirty.txt"
+      lastPath = root / "last.txt"
+    writeFile(keepPath, "keep")
+    writeFile(dirtyPath, "dirty")
+    writeFile(lastPath, "last")
+    defer:
+      removeFile(keepPath)
+      removeFile(dirtyPath)
+      removeFile(lastPath)
+      removeDir(root)
+
+    let frontend = newKosmoApplication(newApplication("Kosmo Tab Context Eligibility"))
+    defer:
+      frontend.close()
+    frontend.openContextTabs([keepPath, dirtyPath, lastPath])
+
+    let tabs = frontend.editorView.documentTabs
+    require tabs.len == 3
+    # Select the middle tab and modify it so a close would defer to the
+    # confirmation when the tab is eligible.
+    require frontend.window.makeFirstResponder(frontend.editorView)
+    require tabs.selectDocumentTabAtIndex(1)
+    require frontend.editorView.editor.handleKey("i")
+    require frontend.editorView.editor.handleTextInput("!")
+    require frontend.editorView.editor.handleKey("Esc")
+    check frontend.editorView.editor.tabs()[1].modified
+    let dirtyIdentifier = tabs[1].identifier()
+    let tabPoint = tabs.pointToWindow(tabs.documentTabRect(0).center())
+
+    # With closing disabled for the strip, the dirty tab neither prompts nor
+    # closes and the batch stops.
+    block stripClosingDisabled:
+      tabs.allowsClosing = false
+      require frontend.window.rightMouseDownAt(tabPoint)
+      let popupButton = frontend.contentView.contextPopupIn()
+      require not popupButton.isNil
+      require popupButton.dispatchPopupKeyDown(
+        KeyEvent(key: keyArrowDown, keyCode: keyArrowDown.ord)
+      )
+      require popupButton.dispatchPopupKeyDown(
+        KeyEvent(key: keyEnter, keyCode: keyEnter.ord)
+      )
+      check frontend.application.modalSession().isNil
+      check tabs.len == 3
+      check tabs[1].identifier() == dirtyIdentifier
+      check frontend.editorView.editor.tabs()[1].modified
+      tabs.allowsClosing = true
+
+    # With the dirty tab item not closeable, the same restrictions hold.
+    block dirtyTabNotCloseable:
+      let item = tabs.documentTabItemWithIdentifier(dirtyIdentifier)
+      require not item.isNil
+      item.closeable = false
+      require frontend.window.rightMouseDownAt(tabPoint)
+      let popupButton = frontend.contentView.contextPopupIn()
+      require not popupButton.isNil
+      require popupButton.dispatchPopupKeyDown(
+        KeyEvent(key: keyArrowDown, keyCode: keyArrowDown.ord)
+      )
+      require popupButton.dispatchPopupKeyDown(
+        KeyEvent(key: keyEnter, keyCode: keyEnter.ord)
+      )
+      check frontend.application.modalSession().isNil
+      check tabs.len == 3
+      check frontend.editorView.editor.tabs()[1].modified

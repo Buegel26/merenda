@@ -1890,9 +1890,11 @@ proc closeTabBatch(
       if not controller.isNil:
         var id: KosmoBufferId
         if entry.identifier.parseTabIdentifier(id):
-          let group = controller[].groupForTabStrip(entry.tabs)
+          let
+            group = controller[].groupForTabStrip(entry.tabs)
+            item = entry.tabs.documentTabItemWithIdentifier(entry.identifier)
           if not group.isNil and not group.editorView.isNil and
-              not group.editorView.syncingTabs and
+              not group.editorView.syncingTabs and entry.tabs.canCloseDocumentTab(item) and
               not controller[].bufferIsVisibleOutside(group, id) and
               controller[].bufferHasUnsavedData(id):
             # The close defers to the unsaved changes confirmation. Accepting

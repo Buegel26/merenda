@@ -1065,8 +1065,13 @@ proc didDoubleClick(tabs: DocumentTabs, item: DocumentTabItem) =
     discard
       delegate.sendLocalIfHandled(didDoubleClickDocumentTab(), (tabs: tabs, item: item))
 
+proc canCloseDocumentTab*(tabs: DocumentTabs, item: DocumentTabItem): bool =
+  ## Whether the standard close flow would attempt to close the tab item: the
+  ## strip allows closing and the item is closeable.
+  result = not item.isNil and tabs.xAllowsClosing and item.xCloseable
+
 proc shouldClose(tabs: DocumentTabs, item: DocumentTabItem, index: int): bool =
-  if item.isNil or not tabs.allowsClosing() or not item.closeable():
+  if not tabs.canCloseDocumentTab(item):
     return false
   let delegate = tabs.delegate()
   if delegate.isNil:
