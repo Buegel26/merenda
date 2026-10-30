@@ -4,8 +4,9 @@
 ## translate their input and paint the returned cells; Moe implementation types
 ## remain private to this module.
 
-import std/[algorithm, hashes, monotimes, options, os, strutils, tables, unicode]
+import std/[algorithm, hashes, json, monotimes, options, os, strutils, tables, unicode]
 import ./panekeys
+import ./lsptcp
 export panekeys.KosmoPaneCommand
 from std/times import initDuration
 
@@ -26,7 +27,6 @@ import moepkg/buffer/edit as moeEdit
 from moepkg/buffer/undo import beginTransaction, commitTransaction, rollbackTransaction
 import moepkg/[editor_window_layout, visible_rows]
 import moepkg/buffer/highlight as moeBufferHighlight
-import moepkg/buffer/core as moeBufferCore
 import moepkg/command_completion as moeCommandCompletion
 import moepkg/command_handlers/config_ops as moeConfigOps
 import moepkg/command_handlers/handler_result as moeHandlerResult
@@ -34,6 +34,9 @@ import moepkg/command_handlers/result_processor as moeResults
 import moepkg/command_handlers/recovery_ops as moeRecoveryOps
 import moepkg/editor_reload as moeReload
 import moepkg/editor_hooks as moeHooks
+import moepkg/lsp_integration as moeLspIntegration
+import moepkg/lsp_service as moeLspService
+import moepkg/lsp/protocol/enums as moeLspEnums
 import moepkg/editor_lsp as moeLsp
 import moepkg/editor_file_jobs as moeJobs
 import moepkg/editor_mode as moeMode
@@ -47,8 +50,8 @@ import moepkg/help_viewer as moeHelpViewer
 import moepkg/highlight as moeHighlight
 from moepkg/buffer/file_io import loadFileWithContent
 from moepkg/buffer/core import BufferId, getLine, getTextString, len
-from moepkg/command_handlers/visual_commands import visualDelete
-from moepkg/registers import setYankedRegister
+from moepkg/command_handlers/visual_commands import visualDelete, operandArea
+from moepkg/registers import storeYanked
 from moepkg/color import EditorColorPairIndex, Rgb, ThemeColors, isTermDefaultColor
 from moepkg/theme import DefaultColors
 from moepkg/render_utils import
@@ -103,7 +106,18 @@ type
 
   MatterSyntaxFallbackState = ref object
     highlightVersions: Table[BufferId, int]
-    remappers: Table[BufferId, bool]
+    snapshots: Table[BufferId, tuple[version: int, text: string]]
+
+  MatterRemapKind = enum
+    rrekClear
+    rrekSingleLine
+    rrekMultiLine
+
+  MatterRemapEvent = object
+    kind: MatterRemapKind
+    row, colDelta, lineCharLenAfter, editCol: int
+    firstAffectedRow, lastAffectedRowBefore, lastAffectedRowAfter: int
+    preservesFirstRow: bool
 
   SearchLocation = object
     bufferId: BufferId
@@ -122,6 +136,9 @@ type
   KosmoEditor* = ref object
     editor: Editor
     nimLspCommand: string
+    nimLspRequested: bool
+    hostMessage: string
+    hostMessageDeadline: Option[MonoTime]
     temporaryBufferIds: Table[string, BufferId]
     workingDirectory: string
     textMateGrammars: seq[KosmoTextMateGrammar]
@@ -140,6 +157,7 @@ type
     clipboardWrite: KosmoClipboardWriter
     clipboardValues: array[KosmoClipboardSelection, Option[string]]
     pollingWork: bool
+    frontendBufferChange: Option[KosmoEditorViewState]
     frontendFingerprint: Hash
     xFrontendRevision: uint64
     recoveryDirectory: string
@@ -150,6 +168,11 @@ type
 
   KosmoBufferId* = distinct int
     ## Stable identity for a Moe buffer without exposing Moe's buffer types.
+
+  KosmoHoverTarget* = object
+    bufferId*: KosmoBufferId
+    version*: int
+    line*, column*: int
 
   KosmoTab* = object
     ## Frontend-neutral information for one tab in the active editor window.
@@ -799,6 +822,61 @@ func hostCommand(r: moeHandlerResult.HandlerResult): Option[KosmoHostCommand] =
       command.forceClose = r.forceClose
   some(command)
 
+proc configureNimdexService(editor: Editor, command: string) =
+  let service = editor.lsp.service
+  var config = service.getConfig("nim").get(
+      moeLspService.LanguageServerConfig(extensions: @["nim", "nims"])
+    )
+  let args = parseCmdLine(command)
+  config.enabled = true
+  if kosmoLspLauncherExecutable.len > 0 and
+      (command.startsWith("tcp://") or defined(posix)):
+    config.command = kosmoLspLauncherExecutable
+    config.args = @[KosmoLspExecFlag] & args
+  elif args.len > 0:
+    config.command = args[0]
+    config.args = args[1 .. ^1]
+  service.setConfig("nim", config)
+
+proc setHostMessage(editor: KosmoEditor, message: string, warning = false) =
+  if editor.isNil or message.len == 0:
+    return
+  editor.hostMessage = strutils.splitWhitespace(message).join(" ")
+  editor.hostMessageDeadline =
+    some(getMonoTime() + initDuration(seconds = (if warning: 15 else: 6)))
+
+proc revealLocation*(
+  editor: KosmoEditor, line, column: int, centered = false
+): bool {.discardable.}
+
+proc routeMoeMessages(editor: KosmoEditor): bool =
+  if editor.isNil or editor.editor.isNil:
+    return
+  let state = editor.editor.state
+  let message = state.statusMessage
+  if message.len > 0:
+    # Moe reports a successful definition jump after setting the target cursor.
+    # Center before the pane captures its new buffer and viewport state.
+    if message.startsWith("Definition at line ") or message.startsWith("Definition in "):
+      let cursor = editor.editor.activeWindow().cursor
+      discard editor.revealLocation(cursor.line, cursor.column, centered = true)
+    let normalized = message.toLowerAscii()
+    editor.setHostMessage(
+      message,
+      warning =
+        "error" in normalized or "failed" in normalized or "warning" in normalized,
+    )
+    editor.editor.state.setStatusQuiet("")
+    result = true
+  if not state.notificationPopup.isNil and state.notificationPopup.queue.len > 0:
+    for notification in state.notificationPopup.queue:
+      editor.setHostMessage(
+        notification.message,
+        warning = notification.level in {moeTypes.nlError, moeTypes.nlWarning},
+      )
+    state.notificationPopup.queue.setLen(0)
+    result = true
+
 proc newKosmoEditor*(
     text = "", workingDirectory = "", nimLspCommand = ""
 ): KosmoEditor =
@@ -809,6 +887,13 @@ proc newKosmoEditor*(
   config.standard.statusLine = false
   config.standard.colorMode = cm24bit
   config.tabLine.enable = false
+  config.autocomplete.lspOnlyAfterDot = true
+  # Auto-indented empty lines otherwise appear as bright trailing whitespace.
+  config.highlight.trailingSpaces = false
+  # Kosmo presents editor notifications in its own status bar.
+  config.notification.popupNotifications = false
+  config.notification.lspForcePopup = false
+  config.notification.lspScreenNotify = false
   if nimLspCommand.len > 0:
     config.lsp.enable = true
     if nimLspCommand.startsWith("tcp://"):
@@ -840,6 +925,7 @@ proc newKosmoEditor*(
   result = KosmoEditor(
     temporaryBufferIds: initTable[string, BufferId](),
     nimLspCommand: nimLspCommand,
+    nimLspRequested: nimLspCommand.len > 0,
     textMateGrammars: grammarState.grammars,
     matterSources: grammarState.sources,
     matterFileTypes: grammarState.fileTypes,
@@ -847,7 +933,7 @@ proc newKosmoEditor*(
     matterRequests: initTable[BufferId, tuple[contentVersion: int, requestId: uint64]](),
     matterSyntaxFallback: MatterSyntaxFallbackState(
       highlightVersions: initTable[BufferId, int](),
-      remappers: initTable[BufferId, bool](),
+      snapshots: initTable[BufferId, tuple[version: int, text: string]](),
     ),
     matterLineStateVersions: initTable[BufferId, int](),
   )
@@ -855,8 +941,32 @@ proc newKosmoEditor*(
   # Moe captures the LSP workspace root during construction.
   result.inWorkingDirectory:
     result.editor = newEditor(config)
+  if nimLspCommand.len > 0:
+    result.editor.configureNimdexService(nimLspCommand)
   result.editor.hostPopupMenus = true
   let host = result.unsafeWeakRef()
+  let service = result.editor.lsp.service
+  let originalLogMessage = service.onLogMessage
+  service.onLogMessage = proc(
+      langId: string, msgType: moeLspEnums.MessageType, message: string
+  ) {.gcsafe.} =
+    originalLogMessage(langId, msgType, message)
+    if msgType != moeLspEnums.mtLog:
+      {.cast(gcsafe).}:
+        let level =
+          case msgType
+          of moeLspEnums.mtError: "error"
+          of moeLspEnums.mtWarning: "warning"
+          else: "info"
+        host[].setHostMessage(
+          "LSP " & langId & " " & level & ": " & message,
+          msgType in {moeLspEnums.mtError, moeLspEnums.mtWarning},
+        )
+  let originalRestart = service.onServerRestart
+  service.onServerRestart = proc(langId: string) {.gcsafe.} =
+    originalRestart(langId)
+    {.cast(gcsafe).}:
+      discard host[].routeMoeMessages()
   result.editor.hostCommandFilter = proc(e: Editor, command: ParsedCommand): bool =
     # Kosmo owns buffer visibility across panes, so it must perform :q's
     # safe-close check before Moe validates against its internal windows.
@@ -867,19 +977,17 @@ proc newKosmoEditor*(
         forceClose: "force" in command.flags,
         bufferId: some(KosmoBufferId(int(e.activeBuffer.id))),
       )
-      # Parsed-command interception does not advance Moe's replay counter.
-      # Queue a harmless result through its public hook so mappings stop here.
+      # Intercept the handled result after command dispatch so Moe's replay
+      # loop observes the host request and stops the remaining mapping keys.
       host[].hostReplayBarrier = true
-      discard e.interceptHostResult(
-        moeHandlerResult.HandlerResult(kind: moeHandlerResult.hrHandled)
-      )
-      host[].hostReplayBarrier = false
       return true
   result.editor.hostResultFilter = proc(
       e: Editor, r: moeHandlerResult.HandlerResult
   ): bool =
     if host[].hostReplayBarrier:
-      return true
+      host[].hostReplayBarrier = false
+      if r.kind == moeHandlerResult.hrHandled:
+        return true
     let request = r.hostCommand()
     if request.isSome:
       var command = request.get
@@ -900,6 +1008,79 @@ proc newKosmoEditor*(
     discard result.editor.handleTextInput(text)
     discard result.editor.handleKeyCombo(moeKeys.toSpecialKeyCombo(moeKeys.skEscape))
   discard forwardMoeMessages()
+
+proc nimdexConnectionStatus*(editor: KosmoEditor): string =
+  ## Describe the actual Nim language server connection state.
+  if editor.isNil or editor.editor.isNil or not editor.nimLspRequested:
+    return "Disconnected"
+  let worker = editor.editor.lsp.service.getWorker("nim")
+  if worker.isNone:
+    return "Disconnected or connection failed"
+  if worker.get.isRunning: "Connected" else: "Connecting…"
+
+proc disconnectNimdex*(editor: KosmoEditor) =
+  ## Stop the Nim LSP worker and prevent automatic restart.
+  if editor.isNil or editor.editor.isNil:
+    return
+  editor.nimLspRequested = false
+  let service = editor.editor.lsp.service
+  var config = service.getConfig("nim")
+  if config.isSome:
+    var disabled = config.get
+    disabled.enabled = false
+    service.setConfig("nim", disabled)
+  discard service.stopWorker("nim")
+  editor.editor.lsp.clearProgressForLanguage("nim")
+
+proc connectNimdex*(editor: KosmoEditor, command: string): string =
+  ## Start a Nim LSP worker and resynchronize open buffers.
+  if editor.isNil or editor.editor.isNil or command.len == 0:
+    return "Enter a Nimdex command or daemon address."
+  if command.startsWith("tcp://"):
+    try:
+      discard parseLspTcpEndpoint(command)
+    except ValueError as error:
+      return error.msg
+    if kosmoLspLauncherExecutable.len == 0:
+      return "TCP connections require the Kosmo LSP launcher."
+  editor.disconnectNimdex()
+  let service = editor.editor.lsp.service
+  editor.editor.configureNimdexService(command)
+  editor.editor.config.lsp.enable = true
+  editor.editor.lsp.setEnabled(true)
+  let started = service.startWorker("nim")
+  if started.isErr:
+    return started.error
+  editor.nimLspRequested = true
+  editor.nimLspCommand = command
+  editor.editor.onLspServerRestart("nim")
+
+proc nimdexProgress*(
+    editor: KosmoEditor
+): tuple[active: bool, percentage: int, hundredths: int, entryPoint: string] =
+  ## Return the current Nimdex indexing progress, if any.
+  if editor.isNil or editor.editor.isNil or editor.editor.lsp.isNil:
+    return
+  for progress in editor.editor.lsp.getActiveProgressList():
+    if progress.langId == "nim" and progress.title == "Nimdex indexing":
+      result.active = true
+      result.percentage = progress.percentage.get(0).clamp(0, 100)
+      result.hundredths = result.percentage * 100
+      if progress.message.isSome:
+        let message = progress.message.get()
+        let endPercent = message.find('%')
+        if endPercent > 0 and endPercent <= 6:
+          try:
+            let value = parseFloat(message[0 ..< endPercent])
+            if value >= 0.0 and value <= 100.0:
+              result.hundredths = int(value * 100.0 + 0.5).clamp(0, 10000)
+          except ValueError:
+            discard
+          let startName = endPercent + 1
+          let endName = message.find(": ", startName)
+          if endName > startName:
+            result.entryPoint = message[startName ..< endName].strip()
+      return
 
 proc nimLspConfiguration*(editor: KosmoEditor): tuple[enabled: bool, command: string] =
   ## Return the Nim language server command selected for this editor.
@@ -923,7 +1104,7 @@ proc reloadInstalledVscodeGrammars*(editor: KosmoEditor) =
   editor.matterLineStateVersions.clear()
   if not editor.matterSyntaxFallback.isNil:
     editor.matterSyntaxFallback.highlightVersions.clear()
-    editor.matterSyntaxFallback.remappers.clear()
+    editor.matterSyntaxFallback.snapshots.clear()
   for buffer in editor.editor.buffers:
     buffer.highlightNeedsUpdate = true
 
@@ -935,7 +1116,7 @@ proc close*(editor: KosmoEditor) =
   editor.matterHighlighting = nil
   if not editor.matterSyntaxFallback.isNil:
     editor.matterSyntaxFallback.highlightVersions.clear()
-    editor.matterSyntaxFallback.remappers.clear()
+    editor.matterSyntaxFallback.snapshots.clear()
   if not editor.editor.isNil:
     editor.editor.hostCommandFilter = nil
     editor.editor.hostResultFilter = nil
@@ -1279,6 +1460,7 @@ proc closeTab*(
   editor.matterRequests.del(id.toMoeBufferId)
   editor.matterLineStateVersions.del(id.toMoeBufferId)
   editor.matterSyntaxFallback.highlightVersions.del(id.toMoeBufferId)
+  editor.matterSyntaxFallback.snapshots.del(id.toMoeBufferId)
   KosmoTabCloseResult(closed: true)
 
 proc save*(editor: KosmoEditor): KosmoSaveResult =
@@ -1333,7 +1515,13 @@ proc status*(editor: KosmoEditor): KosmoStatus =
   let snapshot = editor.editor.frontendStatus()
   KosmoStatus(
     modeLabel: snapshot.modeLabel,
-    message: snapshot.message,
+    message: (
+      if editor.hostMessageDeadline.isSome and
+          getMonoTime() < editor.hostMessageDeadline.get:
+        editor.hostMessage
+      else:
+        snapshot.message
+    ),
     gitBranch: snapshot.git.branch,
     gitAdded: snapshot.git.added,
     gitModified: snapshot.git.modified,
@@ -1348,6 +1536,34 @@ proc cursor*(editor: KosmoEditor): KosmoCursor =
   KosmoCursor(
     row: position.y, column: position.x, visible: editor.editor.state.cursorVisible
   )
+
+proc fitCursorToVisibleRows*(editor: KosmoEditor, visibleRows: int): bool =
+  ## Keep a following cursor inside the host's fully visible rows, excluding overscan.
+  if editor.isNil or editor.editor.isNil:
+    return
+  let
+    engine = editor.editor
+    window = engine.activeWindow()
+    viewport = window.viewport
+  if viewport.detachedFromCursor or
+      window.modeState.kind != moeTypes.ModeStateKind.mskNone:
+    return
+  let
+    previousLine = viewport.topLine
+    previousWrapOffset = viewport.topWrapOffset
+    tabOffset = if engine.showTabLine: 1 else: 0
+    rows = max(visibleRows - viewport.y - tabOffset, 1)
+    layout = engine.rowLayoutFor(
+      window.buffer,
+      viewport.width,
+      engine.viewportOffsetFor(window),
+      window.wrapCountCache,
+    )
+  layout.scrollViewportToCursor(
+    viewport, window.cursor.line, window.cursor.column, rows
+  )
+  result =
+    viewport.topLine != previousLine or viewport.topWrapOffset != previousWrapOffset
 
 proc bufferCursor*(editor: KosmoEditor): KosmoBufferCursor =
   ## Return the logical cursor position in the active text buffer.
@@ -1418,14 +1634,15 @@ proc copySelection*(editor: KosmoEditor): string =
     return
   result = editor.selectedText()
   let isLine = editor.currentSelection().get.kind == KosmoSelectionKind.Line
-  editor.editor.state.registers.setYankedRegister(result, isLine)
+  editor.editor.state.registers.storeYanked(none(char), result, isLine)
 
 proc cutSelection*(editor: KosmoEditor): string =
   ## Delete the active selection as one Moe undo transaction.
   if editor.isNil or editor.editor.isNil or editor.currentSelection().isNone:
     return
   result = editor.selectedText()
-  visualDelete(editor.editor.activeBuffer, editor.editor.state)
+  let (selection, area) = editor.editor.activeBuffer.operandArea(editor.editor.state)
+  discard visualDelete(editor.editor.activeBuffer, editor.editor.state, selection, area)
   editor.editor.syncActiveWindow()
   editor.editor.setActiveWindowScreenCursor(editor.editor.activeWindow)
 
@@ -1831,6 +2048,34 @@ proc completionPopupVisible*(editor: KosmoEditor): bool =
 
 proc handleKey*(editor: KosmoEditor, key: string): bool {.discardable.}
 
+proc completionAnchor(editor: Editor, menu: CompletionMenu): tuple[row, column: int] =
+  let
+    cursor = editor.state.screenCursor
+    window = editor.activeWindow()
+    position = window.cursor
+  result = (cursor.y, cursor.x)
+  if menu.triggerLine != position.line or menu.triggerCol < 0 or
+      menu.triggerCol > position.column or position.line notin 0 ..< window.buffer.len:
+    return
+  let line = window.buffer.getLine(position.line).toRunes()
+  var anchorColumn = min(menu.triggerCol, line.len)
+  if anchorColumn > 0 and line[anchorColumn - 1] == Rune('.'.ord):
+    dec anchorColumn
+  let
+    viewport = window.viewport
+    layout = editor.rowLayoutFor(
+      window.buffer,
+      viewport.width,
+      editor.viewportOffsetFor(window),
+      window.wrapCountCache,
+    )
+    anchor = layout.cursorCell(position.line, anchorColumn, viewport.leftCell)
+    current = layout.cursorCell(
+      position.line, position.column, viewport.leftCell, window.cursorOnTabEnd
+    )
+  result.row = max(0, cursor.y + anchor.wrapSeg - current.wrapSeg)
+  result.column = max(0, cursor.x + anchor.cellX - current.cellX)
+
 proc popupMenu*(editor: KosmoEditor): Option[KosmoPopupMenu] =
   ## Return the menu-like popup Moe currently asks its host to present.
   if editor.isNil or editor.editor.isNil:
@@ -1852,15 +2097,15 @@ proc popupMenu*(editor: KosmoEditor): Option[KosmoPopupMenu] =
 
   let completionMenu = moeEditor.handlerManager.insertHandler.completionManager
   if completionMenu.isActive() and completionMenu.menu.entries.len > 0:
-    let cursor = moeEditor.state.screenCursor
+    let anchor = moeEditor.completionAnchor(completionMenu.menu)
     var menu = KosmoPopupMenu(
       kind: KosmoPopupMenuKind.Completion,
       selectedIndex:
         if completionMenu.menu.hasSelection: completionMenu.menu.selectedIndex else: -1,
       firstIndex: completionMenu.menu.scrollOffset,
       maxVisibleItems: completionMenu.menu.maxVisible,
-      anchorRow: cursor.y,
-      anchorColumn: cursor.x,
+      anchorRow: anchor.row,
+      anchorColumn: anchor.column,
     )
     for entry in completionMenu.menu.entries:
       menu.items.add KosmoPopupMenuItem(
@@ -2061,7 +2306,7 @@ proc captureViewState*(editor: KosmoEditor): KosmoEditorViewState =
     preferredColumn: window.preferredColumn,
     viewportTopLine: window.viewport.topLine,
     viewportTopWrapOffset: window.viewport.topWrapOffset,
-    viewportLeftColumn: window.viewport.leftColumn,
+    viewportLeftColumn: window.viewport.leftCell,
     viewportDetachedFromCursor: window.viewport.detachedFromCursor,
     scrollAnimation: editor.editor.state.windowDisplay.scrollAnimation,
     visualSelection:
@@ -2133,7 +2378,7 @@ proc applyViewState(editor: KosmoEditor, state: KosmoEditorViewState) =
   window.viewport.topLine =
     state.viewportTopLine.clamp(0, max(window.buffer.len - 1, 0))
   window.viewport.topWrapOffset = max(state.viewportTopWrapOffset, 0)
-  window.viewport.leftColumn = max(state.viewportLeftColumn, 0)
+  window.viewport.leftCell = max(state.viewportLeftColumn, 0)
   window.viewport.detachedFromCursor = state.viewportDetachedFromCursor
   editor.editor.state.windowDisplay.scrollAnimation = state.scrollAnimation
   editor.editor.syncActiveWindow()
@@ -2255,7 +2500,7 @@ proc replaceMatterFallbackRows(
 proc remapMatterFallbackSingleLine(
     buffer: TextBuffer,
     segments: sink seq[moeHighlight.ColorSegment],
-    event: moeBufferCore.RowColRemapEvent,
+    event: MatterRemapEvent,
 ): seq[moeHighlight.ColorSegment] =
   ## Preserve Matter colours on the unchanged side of a same-line edit.
   ##
@@ -2307,9 +2552,7 @@ proc remapMatterFallbackSingleLine(
       event.row, editColumn, editColumn + event.colDelta - 1
     )
 
-proc remapMatterMarkdownFallback(
-    buffer: TextBuffer, event: moeBufferCore.RowColRemapEvent
-) =
+proc remapMatterMarkdownFallback(buffer: TextBuffer, event: MatterRemapEvent) =
   ## Retain fenced backgrounds alongside the remapped token colours. These
   ## states are a presentation fallback until the new Matter batches arrive.
   let cache = buffer.incrementalHighlight
@@ -2319,11 +2562,11 @@ proc remapMatterMarkdownFallback(
     cache.lineStates.states
 
   case event.kind
-  of moeBufferCore.rrekClear:
+  of rrekClear:
     buffer.incrementalHighlight = nil
-  of moeBufferCore.rrekSingleLine:
+  of rrekSingleLine:
     cache.parsedUpTo = min(cache.parsedUpTo, event.row - 1)
-  of moeBufferCore.rrekMultiLine:
+  of rrekMultiLine:
     let
       delta = event.lastAffectedRowAfter - event.lastAffectedRowBefore
       row = event.firstAffectedRow + ord(event.preservesFirstRow)
@@ -2348,9 +2591,7 @@ proc remapMatterMarkdownFallback(
       states().setLen(oldLength - removed)
 
 proc remapMatterSyntaxFallback(
-    state: MatterSyntaxFallbackState,
-    buffer: TextBuffer,
-    event: moeBufferCore.RowColRemapEvent,
+    state: MatterSyntaxFallbackState, buffer: TextBuffer, event: MatterRemapEvent
 ) =
   ## Keep the previous Matter projection aligned with edits until its replacement arrives.
   if state.isNil or not state.highlightVersions.hasKey(buffer.id) or
@@ -2358,13 +2599,13 @@ proc remapMatterSyntaxFallback(
     return
   buffer.remapMatterMarkdownFallback(event)
   case event.kind
-  of moeBufferCore.rrekClear:
+  of rrekClear:
     state.highlightVersions.del(buffer.id)
-  of moeBufferCore.rrekSingleLine:
+  of rrekSingleLine:
     var segments = move buffer.highlight.colorSegments
     buffer.highlight.colorSegments =
       buffer.remapMatterFallbackSingleLine(move segments, event)
-  of moeBufferCore.rrekMultiLine:
+  of rrekMultiLine:
     let
       delta = event.lastAffectedRowAfter - event.lastAffectedRowBefore
       firstRow = event.firstAffectedRow
@@ -2411,16 +2652,72 @@ proc remapMatterSyntaxFallback(
     buffer.highlight.colorSegments =
       buffer.replaceMatterFallbackRows(move shifted, replacementFirst, replacementLast)
 
-proc installMatterSyntaxFallbackRemapper(editor: KosmoEditor, buffer: TextBuffer) =
-  let state = editor.matterSyntaxFallback
-  if state.isNil or state.remappers.hasKey(buffer.id):
+proc refreshMatterFallbackSnapshot(
+    state: MatterSyntaxFallbackState, buffer: TextBuffer, text: string
+) =
+  ## Align retained colors with edits since the last requested snapshot.
+  if state.isNil:
     return
-  state.remappers[buffer.id] = true
-  moeBufferCore.registerRowColRemapCallback(
-    buffer,
-    proc(changed: TextBuffer, event: moeBufferCore.RowColRemapEvent) =
-      state.remapMatterSyntaxFallback(changed, event),
-  )
+  if state.snapshots.hasKey(buffer.id):
+    let previous = state.snapshots[buffer.id]
+    if previous.version != buffer.contentVersion and previous.text != text and
+        state.highlightVersions.hasKey(buffer.id):
+      let
+        oldLines = previous.text.split('\n')
+        newLines = text.split('\n')
+      var first = 0
+      while first < oldLines.len and first < newLines.len and
+          oldLines[first] == newLines[first]:
+        inc first
+      var suffix = 0
+      while suffix < oldLines.len - first and suffix < newLines.len - first and
+          oldLines[oldLines.high - suffix] == newLines[newLines.high - suffix]:
+        inc suffix
+      let
+        oldCount = oldLines.len - first - suffix
+        newCount = newLines.len - first - suffix
+      if oldCount == 1 and newCount == 1:
+        let
+          oldRunes = oldLines[first].toRunes()
+          newRunes = newLines[first].toRunes()
+        var column = 0
+        while column < oldRunes.len and column < newRunes.len and
+            oldRunes[column] == newRunes[column]:
+          inc column
+        var trailing = 0
+        while trailing < oldRunes.len - column and trailing < newRunes.len - column and
+            oldRunes[oldRunes.high - trailing] == newRunes[newRunes.high - trailing]:
+          inc trailing
+        # A replacement or several edits cannot be represented as a single
+        # insertion/deletion; clear the row until its new colors arrive.
+        let replaced =
+          oldRunes.len - column - trailing > 0 and newRunes.len - column - trailing > 0
+        state.remapMatterSyntaxFallback(
+          buffer,
+          MatterRemapEvent(
+            kind: rrekSingleLine,
+            row: first,
+            editCol: column,
+            colDelta:
+              if replaced:
+                0
+              else:
+                newRunes.len - oldRunes.len,
+            lineCharLenAfter: newRunes.len,
+          ),
+        )
+      else:
+        state.remapMatterSyntaxFallback(
+          buffer,
+          MatterRemapEvent(
+            kind: rrekMultiLine,
+            firstAffectedRow: first,
+            lastAffectedRowBefore: first + oldCount - 1,
+            lastAffectedRowAfter: first + newCount - 1,
+            preservesFirstRow: oldCount > 0 and newCount > 0,
+          ),
+        )
+  state.snapshots[buffer.id] = (version: buffer.contentVersion, text: text)
 
 proc replaceMatterBatch(
     segments: var seq[moeHighlight.ColorSegment],
@@ -2484,7 +2781,6 @@ proc applyMatterHighlightResult(
   current.highlight.colorSegments.replaceMatterBatch(
     completed.firstRow, completed.endRow, move completed.segments
   )
-  editor.installMatterSyntaxFallbackRemapper(current)
   editor.matterSyntaxFallback.highlightVersions[current.id] = completed.contentVersion
   if current.language == moeHighlight.SourceLanguage.langMarkdown:
     if not retainingProjection or current.incrementalHighlight.isNil:
@@ -2590,14 +2886,17 @@ proc renderSearchHighlights(editor: KosmoEditor, target: var RenderBuffer) =
               if e.lineWrap:
                 layout.segmentStartColumn(visible.line, visible.skipSegments + row)
               else:
-                viewport.leftColumn
+                layout.cellToColumn(visible.line, 0, 0, viewport.leftCell)
             let (_, rowWidth) =
               displayWidthSubstrWithTabs(line, startColumn, width, e.tabStop)
             var x = 0
             while x < min(width, rowWidth):
               let cell = target.buffer.getCell(left + x, y)
               let column =
-                startColumn + screenXToCharIndex(line, startColumn, x, e.tabStop)
+                if e.lineWrap:
+                  startColumn + screenXToCharIndex(line, startColumn, x, e.tabStop)
+                else:
+                  layout.cellToColumn(visible.line, 0, x, viewport.leftCell)
               var highlighted = false
               for span in ranges:
                 if column >= span.first and column < span.last:
@@ -2638,7 +2937,15 @@ proc renderMatterFrame(editor: KosmoEditor, buffer: var RenderBuffer) =
         current.incrementalHighlight.parsedUpTo = current.len - 1
       current.uriScanParsedUpTo = current.len - 1
   try:
-    editor.editor.render(buffer.buffer)
+    let previousBuffer = editor.activeBufferId()
+    discard editor.routeMoeMessages()
+    # Moe polls for messages inside render; redraw after moving new ones out.
+    for _ in 0 .. 2:
+      editor.editor.render(buffer.buffer)
+      if not editor.routeMoeMessages():
+        break
+    if editor.activeBufferId() != previousBuffer:
+      editor.frontendBufferChange = some(editor.captureViewState())
     editor.renderSearchHighlights(buffer)
   finally:
     for item in suspended:
@@ -2658,6 +2965,7 @@ proc scheduleMatterHighlighting(editor: KosmoEditor) =
     editor.matterRequests.del(id)
     editor.matterLineStateVersions.del(id)
     editor.matterSyntaxFallback.highlightVersions.del(id)
+    editor.matterSyntaxFallback.snapshots.del(id)
   for buffer in editor.editor.buffers:
     if editor.matterLineStateVersions.hasKey(buffer.id) and (
       editor.matterLineStateVersions[buffer.id] != buffer.contentVersion or
@@ -2671,6 +2979,7 @@ proc scheduleMatterHighlighting(editor: KosmoEditor) =
       editor.matterHighlighting.cancelMatterHighlight(int(buffer.id))
       editor.matterRequests.del(buffer.id)
       editor.matterSyntaxFallback.highlightVersions.del(buffer.id)
+      editor.matterSyntaxFallback.snapshots.del(buffer.id)
       continue
     discard editor.matterHighlightingController()
     if buffer.highlightBackend != hbBuiltin:
@@ -2679,10 +2988,12 @@ proc scheduleMatterHighlighting(editor: KosmoEditor) =
         editor.matterRequests[buffer.id].contentVersion == buffer.contentVersion and
         not buffer.highlightNeedsUpdate:
       continue
+    let text = buffer.getTextString()
+    editor.matterSyntaxFallback.refreshMatterFallbackSnapshot(buffer, text)
     let requestId = editor.matterHighlighting.requestMatterHighlight(
       int(buffer.id),
       buffer.contentVersion,
-      buffer.getTextString(),
+      text,
       buffer.language,
       if buffer.filePath.isSome: buffer.filePath.get else: "",
     )
@@ -2773,6 +3084,103 @@ proc handleScrollInput*(editor: KosmoEditor, input: ScrollInput): ScrollOutcome 
     appliedRows: outcome.appliedRows,
     viewportPhysicalRowsMoved: outcome.viewportPhysicalRowsMoved,
   )
+
+proc hoverTargetAt*(
+    editor: KosmoEditor,
+    state: KosmoEditorViewState,
+    render: RenderBuffer,
+    row, column: int,
+): Option[KosmoHoverTarget] =
+  ## Map a pane's grid cell through Moe's row layout without changing focus.
+  if editor.isNil or editor.editor.isNil or state.bufferId.isNone:
+    return
+  let found = editor.editor.bufferById(state.bufferId.get.toMoeBufferId)
+  if found.isNone:
+    return
+  let buffer = found.get
+  let engine = editor.editor
+  let viewport = moeTypes.ViewPort(
+    width: render.buffer.area.width, height: render.buffer.area.height
+  )
+  let window = moeTypes.EditorWindow(
+    viewBuffer: buffer, viewport: viewport, mode: state.selectionMode
+  )
+  let tabOffset = if engine.showTabLine: 1 else: 0
+  let textRow = row - tabOffset
+  let textColumn = column - engine.gutterWidth(window)
+  if textRow < 0 or textRow >= viewport.height - steadyBottomAreaHeight() - tabOffset or
+      textColumn < 0 or textColumn >= engine.textAreaWidth(window):
+    return
+  let tabStop =
+    if buffer.editorConfig.isSome and buffer.editorConfig.get.tabStop.isSome:
+      buffer.editorConfig.get.tabStop.get
+    else:
+      engine.config.standard.tabStop
+  let layout =
+    initRowLayout(buffer, nil, engine.lineWrap, engine.wrapWidth(window), tabStop)
+  let hit = layout.rowAt(state.viewportTopLine, state.viewportTopWrapOffset, textRow)
+  if hit.isNone or hit.get.fold.isSome:
+    return
+  let line = hit.get.line
+  let targetColumn =
+    layout.cellToColumn(line, hit.get.wrapSeg, textColumn, state.viewportLeftColumn)
+  let text = buffer.getLine(line)
+  if text.runeLen == 0:
+    return
+  let start = layout.cursorCell(line, targetColumn, state.viewportLeftColumn)
+  let finish = layout.cursorCell(line, targetColumn + 1, state.viewportLeftColumn)
+  let endCell = if finish.wrapSeg != start.wrapSeg: layout.maxWidth else: finish.cellX
+  if start.wrapSeg != hit.get.wrapSeg or textColumn < start.cellX or
+      textColumn >= endCell:
+    return
+  some(
+    KosmoHoverTarget(
+      bufferId: state.bufferId.get,
+      version: buffer.contentVersion,
+      line: line,
+      column: targetColumn,
+    )
+  )
+
+proc startPointerHover*(editor: KosmoEditor, target: KosmoHoverTarget): int =
+  ## Start a tracked hover request without moving Moe's cursor.
+  if editor.isNil or editor.editor.isNil or not editor.editor.lsp.enabled:
+    return -1
+  let found = editor.editor.bufferById(target.bufferId.toMoeBufferId)
+  if found.isNone or found.get.contentVersion != target.version:
+    return -1
+  let buffer = found.get
+  if not editor.editor.lsp.hasHoverSupport(buffer) or
+      editor.editor.lsp.requestSyncGate(buffer, moeTypes.lrfHover).isSome:
+    return -1
+  let request = editor.editor.lsp.startHoverRequest(buffer, target.line, target.column)
+  if request.isOk: request.get else: -1
+
+proc cancelPointerHover*(editor: KosmoEditor, requestId: int) =
+  if not editor.isNil and not editor.editor.isNil and requestId >= 0:
+    editor.editor.lsp.cancelRequest(requestId)
+
+proc pollPointerHover*(
+    editor: KosmoEditor, target: KosmoHoverTarget, requestId: int
+): tuple[done: bool, text: string, markdown: bool] =
+  if editor.isNil or editor.editor.isNil or requestId < 0:
+    return (true, "", false)
+  let found = editor.editor.bufferById(target.bufferId.toMoeBufferId)
+  if found.isNone or found.get.contentVersion != target.version:
+    editor.cancelPointerHover(requestId)
+    return (true, "", false)
+  let response = editor.editor.lsp.checkResponse(requestId)
+  if response.status == moeLspService.lrsPending:
+    return
+  result.done = true
+  if response.status == moeLspService.lrsSuccess and response.result.isSome:
+    let hover = moeLspService.parseHoverResponse(response.result.get)
+    if hover.isSome:
+      result.text = moeLspIntegration.getHoverText(hover.get)
+      let contents = hover.get.contents
+      result.markdown =
+        contents.kind == JObject and contents.hasKey("kind") and
+        contents["kind"].getStr() == "markdown"
 
 func requestsTabClose(commandText: string): bool =
   let parts = strutils.splitWhitespace(commandText.strip().toLowerAscii())

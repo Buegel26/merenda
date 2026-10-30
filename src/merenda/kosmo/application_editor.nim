@@ -164,7 +164,26 @@ proc syncMarkdownColorMode(
   controls.xThemeColorMode = mode
   controls.syncMarkdownColorButton()
 
-proc markdownPresentationStyle*(controls: KosmoMarkdownControls): nimkit.MarkdownStyle =
+proc applyDarkMarkdownSyntaxColors(style: var nimkit.MarkdownStyle) =
+  for tokenClass in nimkit.SyntaxTokenClass:
+    style.syntaxTokenColors[tokenClass] = style.codeColor
+  style.syntaxTokenColors[nimkit.stcKeyword] = nimkit.color(0.80, 0.65, 0.96, 1.0)
+  style.syntaxTokenColors[nimkit.stcIdentifier] = nimkit.color(0.54, 0.71, 0.98, 1.0)
+  style.syntaxTokenColors[nimkit.stcString] = nimkit.color(0.65, 0.89, 0.63, 1.0)
+  style.syntaxTokenColors[nimkit.stcNumber] = nimkit.color(0.98, 0.70, 0.53, 1.0)
+  style.syntaxTokenColors[nimkit.stcComment] = style.mutedColor
+  style.syntaxTokenColors[nimkit.stcOperator] = nimkit.color(0.54, 0.71, 0.98, 1.0)
+  style.syntaxTokenColors[nimkit.stcPunctuation] = nimkit.color(0.58, 0.60, 0.70, 1.0)
+  style.syntaxTokenColors[nimkit.stcPreprocessor] = nimkit.color(0.80, 0.65, 0.96, 1.0)
+
+func richTextColor(value: KosmoMoeThemeColor): nimkit.Color =
+  nimkit.color(
+    value.red.float32 / 255, value.green.float32 / 255, value.blue.float32 / 255, 1.0
+  )
+
+proc markdownPresentationStyle*(
+    controls: KosmoMarkdownControls, target = KosmoThemeTarget.Markdown
+): nimkit.MarkdownStyle =
   result = nimkit.initMarkdownStyle()
   if not controls.isNil and controls.xColorMode == kmcmDark:
     result.backgroundColor = nimkit.color(0.055, 0.065, 0.085, 1.0)
@@ -179,18 +198,41 @@ proc markdownPresentationStyle*(controls: KosmoMarkdownControls): nimkit.Markdow
     result.ruleColor = nimkit.color(0.35, 0.40, 0.49, 1.0)
     result.codeBlockStyle.backgroundColor = nimkit.color(0.08, 0.10, 0.14, 1.0)
     result.codeBlockStyle.outlineColor = nimkit.color(0.28, 0.33, 0.42, 1.0)
-    for tokenClass in nimkit.SyntaxTokenClass:
-      result.syntaxTokenColors[tokenClass] = result.codeColor
-    result.syntaxTokenColors[nimkit.stcKeyword] = nimkit.color(0.80, 0.65, 0.96, 1.0)
-    result.syntaxTokenColors[nimkit.stcIdentifier] = nimkit.color(0.54, 0.71, 0.98, 1.0)
-    result.syntaxTokenColors[nimkit.stcString] = nimkit.color(0.65, 0.89, 0.63, 1.0)
-    result.syntaxTokenColors[nimkit.stcNumber] = nimkit.color(0.98, 0.70, 0.53, 1.0)
-    result.syntaxTokenColors[nimkit.stcComment] = result.mutedColor
-    result.syntaxTokenColors[nimkit.stcOperator] = nimkit.color(0.54, 0.71, 0.98, 1.0)
-    result.syntaxTokenColors[nimkit.stcPunctuation] =
-      nimkit.color(0.58, 0.60, 0.70, 1.0)
-    result.syntaxTokenColors[nimkit.stcPreprocessor] =
-      nimkit.color(0.80, 0.65, 0.96, 1.0)
+    result.applyDarkMarkdownSyntaxColors()
+
+  if not controls.isNil and not controls.xColorModeOverride and
+      not controls.editorView.isNil:
+    let view = controls.editorView[]
+    if not view.tabsDelegate.isNil and not view.tabsDelegate.dockController.isNil:
+      let controller = view.tabsDelegate.dockController[]
+      if not controller.frontend.isNil:
+        let theme = controller.frontend[].xRichTextThemes[target]
+        if theme.identifier.len > 0:
+          let preview = theme.preview
+          result.backgroundColor = preview.background.richTextColor()
+          result.textColor = preview.foreground.richTextColor()
+          result.headingColor = preview.functionName.richTextColor()
+          result.strongColor = preview.foreground.richTextColor()
+          result.emphasisColor = preview.keyword.richTextColor()
+          result.linkColor = preview.cyan.richTextColor()
+          result.codeColor = preview.stringLiteral.richTextColor()
+          result.quoteColor = preview.comment.richTextColor()
+          result.mutedColor = preview.comment.richTextColor()
+          result.ruleColor = preview.comment.richTextColor()
+          result.codeBlockStyle.backgroundColor = preview.background.richTextColor()
+          result.codeBlockStyle.outlineColor = preview.comment.richTextColor()
+          for tokenClass in nimkit.SyntaxTokenClass:
+            result.syntaxTokenColors[tokenClass] = result.textColor
+          result.syntaxTokenColors[nimkit.stcKeyword] = preview.keyword.richTextColor()
+          result.syntaxTokenColors[nimkit.stcIdentifier] =
+            preview.functionName.richTextColor()
+          result.syntaxTokenColors[nimkit.stcString] =
+            preview.stringLiteral.richTextColor()
+          result.syntaxTokenColors[nimkit.stcNumber] = preview.yellow.richTextColor()
+          result.syntaxTokenColors[nimkit.stcComment] = preview.comment.richTextColor()
+          result.syntaxTokenColors[nimkit.stcOperator] = preview.cyan.richTextColor()
+          result.syntaxTokenColors[nimkit.stcPreprocessor] =
+            preview.keyword.richTextColor()
 
   let
     fontSize = if controls.isNil: KosmoMarkdownDefaultFontSize else: controls.xFontSize
@@ -319,6 +361,8 @@ proc statusText(
 ): string =
   var parts: seq[string]
   var activeFilePath: Option[string]
+  if status.message.len > 0:
+    parts.add status.message
   if status.modeLabel.len > 0:
     parts.add status.modeLabel
   for tab in tabs:
@@ -326,8 +370,6 @@ proc statusText(
       parts.add tab.title
       activeFilePath = tab.filePath
       break
-  if status.message.len > 0:
-    parts.add status.message
   if status.gitBranch.len > 0:
     var git = "Git: " & status.gitBranch
     if status.gitAdded != 0:
@@ -473,7 +515,18 @@ proc selectVisibleBuffer(view: KosmoEditorView, tabs: openArray[KosmoTab]) =
             )
           view.searchBar.errorMessage = view.editor.searchError()
 
-proc adoptActiveBuffer(view: KosmoEditorView): bool =
+proc rememberViewState(
+    view: KosmoEditorView, id: KosmoBufferId, state: KosmoEditorViewState
+) =
+  let index = view.viewStateIndex(id)
+  if index >= 0:
+    view.viewStates[index] = state
+  else:
+    view.viewStates.add state
+
+proc adoptActiveBuffer(
+    view: KosmoEditorView, state = none(KosmoEditorViewState)
+): bool =
   if not view.usesBufferSubset:
     return
   for tab in view.editor.tabs():
@@ -482,10 +535,14 @@ proc adoptActiveBuffer(view: KosmoEditorView): bool =
         let controller = view.tabsDelegate.dockController[]
         for group in controller.groups:
           if group.editorView != view and tab.id in group.editorView.bufferIds:
+            if state.isSome and state.get.bufferId == some(tab.id):
+              group.editorView.rememberViewState(tab.id, state.get)
             controller.activatePaneTab(group, tab.id.tabIdentifier)
             return true
       if tab.id notin view.bufferIds:
         view.bufferIds.add tab.id
+      if state.isSome and state.get.bufferId == some(tab.id):
+        view.rememberViewState(tab.id, state.get)
       view.selectedBufferId = some(tab.id)
       view.selectEditorContent(tab.id)
       view.lastTabs.setLen(0)
@@ -571,6 +628,120 @@ proc isActiveEditorGroup(view: KosmoEditorView): bool =
   let controller = view.tabsDelegate.dockController[]
   controller.activeGroup.isNil or controller.activeGroup.editorView == view
 
+proc clearPointerHover(view: KosmoEditorView) =
+  if view.hoverRequestId >= 0:
+    view.editor.cancelPointerHover(view.hoverRequestId)
+    view.hoverRequestId = -1
+  view.hoverDeadline = none(MonoTime)
+  view.hoverTarget = none(KosmoHoverTarget)
+  view.hoverText.setLen(0)
+  let window = view.window()
+  if window of nimkit.Window:
+    nimkit.Window(window).hideToolTipForView(view)
+
+proc pointerHoverTarget(
+    view: KosmoEditorView, point: nimkit.Point
+): Option[KosmoHoverTarget] =
+  if view.selectedBufferId.isNone:
+    return
+  var state: KosmoEditorViewState
+  let controller =
+    if view.tabsDelegate.isNil:
+      default(WeakRef[KosmoDockController])
+    else:
+      view.tabsDelegate.dockController
+  if controller.isNil or (
+    not controller[].projectedEditorView.isNil and
+    controller[].projectedEditorView[] == view
+  ):
+    state = view.editor.captureViewState()
+  else:
+    let index = view.viewStateIndex(view.selectedBufferId.get)
+    if index < 0:
+      return
+    state = view.viewStates[index]
+  if state.bufferId != view.selectedBufferId:
+    return
+  let position = view.rowColumnAtPoint(point)
+  view.editor.hoverTargetAt(state, view.renderBuffer, position.row, position.column)
+
+proc updatePointerHover(view: KosmoEditorView, point: nimkit.Point) =
+  let target = view.pointerHoverTarget(point)
+  if target != view.hoverTarget:
+    view.clearPointerHover()
+    view.hoverTarget = target
+    if target.isSome:
+      view.hoverDeadline = some(getMonoTime() + initDuration(milliseconds = 500))
+  view.hoverPoint = point
+
+proc pollPointerHover(view: KosmoEditorView) =
+  if view.hoverTarget.isNone:
+    return
+  if view.pointerHoverTarget(view.hoverPoint) != view.hoverTarget:
+    view.clearPointerHover()
+    return
+  if view.hoverDeadline.isSome and getMonoTime() >= view.hoverDeadline.get:
+    view.hoverDeadline = none(MonoTime)
+    view.hoverRequestId = view.editor.startPointerHover(view.hoverTarget.get)
+  if view.hoverRequestId >= 0:
+    let response =
+      view.editor.pollPointerHover(view.hoverTarget.get, view.hoverRequestId)
+    if response.done:
+      view.hoverRequestId = -1
+      view.hoverText = response.text
+      let window = view.window()
+      if view.hoverText.len > 0 and window of nimkit.Window:
+        let tooltip = view.effectiveAppearance().resolveTooltipStyle()
+        var richText: nimkit.TextStorage
+        if response.markdown:
+          var style = nimkit.initMarkdownStyle()
+          style.textColor = tooltip.text.color
+          style.headingColor = tooltip.text.color
+          style.strongColor = tooltip.text.color
+          style.emphasisColor = tooltip.text.color
+          style.codeColor = tooltip.text.color
+          style.quoteColor = tooltip.text.color
+          style.mutedColor = tooltip.text.color
+          style.bodyFontSize = tooltip.text.fontSize
+          style.documentInsets = nimkit.insets(0.0)
+          if view.effectiveAppearance().markdownColorMode() == kmcmDark:
+            style.applyDarkMarkdownSyntaxColors()
+          style.syntaxTokenColors[nimkit.stcOther] = tooltip.text.color
+          richText = nimkit.markdownTextStorage(view.hoverText, style)
+        else:
+          richText = nimkit.newTextStorage(
+            view.hoverText,
+            nimkit.defaultTextAttributes(
+              color = tooltip.text.color,
+              fontSize = tooltip.text.fontSize,
+              fontName = tooltip.text.fontName,
+              fontFace = tooltip.text.fontFace,
+            ),
+          )
+        nimkit.Window(window).showToolTipAtPoint(view, view.hoverPoint, richText)
+
+protocol KosmoEditorHoverEvents of nimkit.ResponderEventProtocol:
+  method mouseMoved(view: KosmoEditorView, event: nimkit.MouseEvent): bool =
+    view.updatePointerHover(event.location)
+    false
+
+  method mouseExited(view: KosmoEditorView, event: nimkit.MouseEvent): bool =
+    discard event
+    view.clearPointerHover()
+    false
+
+protocol KosmoEditorHoverToolTip of nimkit.ViewProtocol:
+  method toolTipAtPoint(view: KosmoEditorView, point: nimkit.Point): string =
+    if view.hoverTarget.isSome and view.pointerHoverTarget(point) == view.hoverTarget:
+      return view.hoverText
+
+protocol KosmoEditorHoverLifecycle of nimkit.ViewLifecycleProtocol:
+  proc hoverViewWillMoveToWindow(
+      view: KosmoEditorView, window: nimkit.Responder
+  ) {.slotFor: viewWillMoveToWindow.} =
+    discard window
+    view.clearPointerHover()
+
 proc refresh*(view: KosmoEditorView)
 proc syncPopupMenu(pane: KosmoEditorPane)
 proc revealFileSearchMatch(view: KosmoMarkdownView, match: nimkit.FileSearchMatch)
@@ -632,13 +803,74 @@ proc syncCommandBar(view: KosmoEditorView, command: KosmoCommandLine) =
       -firstColumn.float32 * metrics.cellWidth, bar.commandBarTextVerticalOffset()
     )
 
+proc syncIndexProgress(
+    bar: KosmoStatusBar,
+    progress: tuple[active: bool, percentage: int, hundredths: int, entryPoint: string],
+) =
+  if bar.indexProgress.hidden != not progress.active:
+    bar.indexProgress.hidden = not progress.active
+    bar.indexSpinner.hidden = not progress.active
+    bar.indexProgressLabel.hidden = not progress.active
+    if progress.active:
+      bar.indexSpinner.startAnimation()
+      let animation = nimkit.newPropertyAnimation[float32](
+        nimkit.DynamicAgent(bar.indexSpinner),
+        nimkit.`animationPhase=`(),
+        0.0'f32,
+        1.0'f32,
+        duration = initDuration(milliseconds = 1000),
+      )
+      animation.loopCount = -1
+      bar.indexSpinnerAnimation = animation
+      if bar.window() of nimkit.Window:
+        discard nimkit.Window(bar.window()).startAnimation(animation)
+    else:
+      bar.indexSpinner.stopAnimation()
+      if not bar.indexSpinnerAnimation.isNil:
+        if bar.window() of nimkit.Window:
+          discard nimkit.Window(bar.window()).stopAnimation(bar.indexSpinnerAnimation)
+        else:
+          bar.indexSpinnerAnimation.stop()
+        bar.indexSpinnerAnimation = nil
+    bar.setNeedsLayout()
+  let entryHidden = not progress.active or progress.entryPoint.len == 0
+  if bar.indexEntryLabel.hidden != entryHidden:
+    bar.indexEntryLabel.hidden = entryHidden
+    bar.setNeedsLayout()
+  if progress.active:
+    bar.indexEntryLabel.text = progress.entryPoint
+    bar.indexEntryLabel.toolTip = progress.entryPoint
+    bar.indexProgress.value = progress.hundredths.float32 / 100
+    bar.indexProgressLabel.text =
+      $(progress.hundredths div 100) & "." &
+      align($(progress.hundredths mod 100), 2, '0') & "%"
+
+proc syncIndexProgress(view: KosmoEditorView) =
+  if not view.isActiveEditorGroup():
+    return
+  let progress = view.editor.nimdexProgress()
+  if not view.tabsDelegate.isNil and not view.tabsDelegate.dockController.isNil:
+    for host in view.tabsDelegate.dockController[].hosts:
+      if not host.statusLabel.isNil and host.statusLabel.superview() of KosmoStatusBar:
+        KosmoStatusBar(host.statusLabel.superview()).syncIndexProgress(progress)
+  elif not view.statusLabel.isNil and view.statusLabel.superview() of KosmoStatusBar:
+    KosmoStatusBar(view.statusLabel.superview()).syncIndexProgress(progress)
+
 proc syncChrome(view: KosmoEditorView) =
   let tabs = view.visibleTabs(view.editor.tabs())
   view.syncTabs(tabs)
+  view.syncIndexProgress()
+  if view.isActiveEditorGroup() and not view.tabsDelegate.isNil and
+      not view.tabsDelegate.dockController.isNil:
+    let controller = view.tabsDelegate.dockController[]
+    if not controller.frontend.isNil and not controller.frontend[].xSettingsWindow.isNil:
+      controller.frontend[].xSettingsWindow.refreshNimdexStatus()
   if not view.statusLabel.isNil and view.isActiveEditorGroup():
-    let text = view.editor.status().statusText(tabs, view.editor.workingDirectory())
+    let status = view.editor.status()
+    let text = status.statusText(tabs, view.editor.workingDirectory())
     if view.statusLabel.text != text:
       view.statusLabel.text = text
+    view.statusLabel.toolTip = status.message
   if view.isActiveEditorGroup() and not view.tabsDelegate.isNil and
       not view.tabsDelegate.dockController.isNil:
     view.tabsDelegate.dockController[].syncKeyModeChoices()
@@ -897,6 +1129,10 @@ proc renderGrid(view: KosmoEditorView) =
   if view.renderBuffer.width != columns or view.renderBuffer.height != rows:
     view.renderBuffer.resize(columns.Natural, rows.Natural)
   view.editor.render(view.renderBuffer, view.editor.captureViewState())
+  let visibleRows =
+    max(int(floor(bounds.size.height / metrics.lineHeight + view.scrollOffsetRows)), 1)
+  if view.editor.fitCursorToVisibleRows(visibleRows):
+    view.editor.render(view.renderBuffer, view.editor.captureViewState())
   view.saveViewState()
   let provider: nimkit.MonoTextRowProvider = proc(
       row: int, builder: var nimkit.MonoTextRowBuilder
@@ -927,6 +1163,9 @@ proc refresh*(view: KosmoEditorView) =
     return
   if view.isActiveEditorGroup():
     discard view.editor.pollFrontendWork()
+    let bufferChange = view.editor.takeFrontendBufferChange()
+    if bufferChange.isSome and view.adoptActiveBuffer(bufferChange):
+      return
   if view.handleHostCommands() and not view.isActiveEditorGroup():
     return
   if view.editor.configViewerOpen():
@@ -1343,6 +1582,7 @@ proc handleHostHelpKey(view: KosmoMarkdownView, event: nimkit.KeyEvent): bool =
   true
 
 proc handleRawEvent(view: KosmoEditorView, event: nimkit.MonoTextRawEvent): bool =
+  view.clearPointerHover()
   if event.kind == nimkit.mtreMouseDown and not view.tabsDelegate.dockController.isNil:
     view.tabsDelegate.dockController[].activateGroup(view)
   view.selectVisibleBuffer(view.visibleTabs(view.editor.tabs()))
@@ -2002,6 +2242,7 @@ proc newKosmoEditorView*(editor = newKosmoEditor()): KosmoEditorView =
     documentTabs: nimkit.newDocumentTabs(),
     renderBuffer: newRenderBuffer(80, 24),
     matterRefreshActive: true,
+    hoverRequestId: -1,
   )
   result.initMonoTextViewFields(editable = true)
   result.clipsToBounds = true
@@ -2020,6 +2261,9 @@ proc newKosmoEditorView*(editor = newKosmoEditor()): KosmoEditorView =
   discard result.withProtocol(KosmoEditorEditingCommands)
   discard result.withProtocol(KosmoEditorCommandDispatch)
   discard result.withProtocol(KosmoEditorKeyViewParticipation)
+  discard result.withProtocol(KosmoEditorHoverEvents)
+  discard result.withProtocol(KosmoEditorHoverToolTip)
+  discard result.withProtocol(KosmoEditorHoverLifecycle)
   let keyEquivalentMethod: nimkit.DynamicMethod = proc(
       self: nimkit.DynamicAgent, invocation: var nimkit.Invocation
   ) =
@@ -2198,6 +2442,7 @@ proc toggleSelectedMarkdownMode(controls: KosmoMarkdownControls) =
 proc toggleMarkdownColorMode(controls: KosmoMarkdownControls) =
   if controls.isNil:
     return
+  controls.xColorModeOverride = true
   controls.xColorMode = if controls.xColorMode == kmcmLight: kmcmDark else: kmcmLight
   if not controls.editorView.isNil:
     controls.editorView[].refresh()
@@ -2634,8 +2879,41 @@ protocol KosmoStatusBarLayout of nimkit.ViewLayoutProtocol:
       choiceHeight = min(20.0'f32, max(bounds.size.height - 8.0'f32, 0.0'f32))
       choiceX = max(bounds.size.width - choiceWidth - 4.0'f32, 0.0'f32)
       choiceY = (bounds.size.height - choiceHeight) * 0.5'f32
+    let entryWidth =
+      if bar.indexEntryLabel.hidden:
+        0.0'f32
+      else:
+        min(140.0'f32, max(choiceX - 166.0'f32, 0.0'f32))
+    let progressWidth =
+      if bar.indexProgress.hidden:
+        0.0'f32
+      else:
+        min(166.0'f32 + entryWidth, choiceX)
+    let progressX = max(choiceX - progressWidth, 0.0'f32)
     bar.label.setFrameFromLayout(
-      nimkit.rect(0, 0, max(choiceX - 4.0'f32, 0.0'f32), bounds.size.height)
+      nimkit.rect(0, 0, max(progressX - 4.0'f32, 0.0'f32), bounds.size.height)
+    )
+    bar.indexEntryLabel.setFrameFromLayout(
+      nimkit.rect(progressX, 0, entryWidth, bounds.size.height)
+    )
+    bar.indexSpinner.setFrameFromLayout(
+      nimkit.rect(progressX + entryWidth, choiceY + 2, 16, 16)
+    )
+    bar.indexProgress.setFrameFromLayout(
+      nimkit.rect(
+        progressX + entryWidth + 20,
+        choiceY + 5,
+        max(progressWidth - entryWidth - 76, 0.0'f32),
+        10,
+      )
+    )
+    bar.indexProgressLabel.setFrameFromLayout(
+      nimkit.rect(
+        max(choiceX - 52, progressX),
+        0,
+        min(52.0'f32, progressWidth),
+        bounds.size.height,
+      )
     )
     bar.keyModeChoice.setFrameFromLayout(
       nimkit.rect(choiceX, choiceY, choiceWidth, choiceHeight)
@@ -2710,6 +2988,26 @@ proc newKosmoStatusBar(label: nimkit.Label, withSidebarButtons: bool): KosmoStat
   let
     menu = nimkit.newMenu("Editor keymode")
     choice = nimkit.newPopupMenuButton(KosmoKeyModes[0].title, menu)
+    indexProgress = nimkit.newProgressIndicator()
+    indexSpinner = nimkit.newProgressIndicator()
+    indexProgressLabel = nimkit.newStatusLabel("")
+    indexEntryLabel = nimkit.newStatusLabel("")
+  indexProgress.identifier = "kosmo.nimdex.progress"
+  indexProgress.accessibilityLabel = "Nimdex indexing"
+  indexProgress.toolTip = "Nimdex: estimated progress for the current entry point"
+  indexProgress.maxValue = 100
+  indexProgress.hidden = true
+  indexSpinner.identifier = "kosmo.nimdex.progress.spinner"
+  indexSpinner.accessibilityLabel = "Nimdex indexing activity"
+  indexSpinner.progressIndicatorStyle = nimkit.pisSpinning
+  indexSpinner.indeterminate = true
+  indexSpinner.displayedWhenStopped = false
+  indexSpinner.hidden = true
+  indexProgressLabel.identifier = "kosmo.nimdex.progress.percentage"
+  indexProgressLabel.hidden = true
+  indexEntryLabel.identifier = "kosmo.nimdex.progress.entrypoint"
+  indexEntryLabel.hidden = true
+  indexEntryLabel.alignment = nimkit.taRight
   choice.identifier = KosmoKeyModeSelectorIdentifier
   choice.styleId = KosmoKeyModeSelectorIdentifier
   choice.accessibilityLabel = "Editor keymode"
@@ -2719,10 +3017,21 @@ proc newKosmoStatusBar(label: nimkit.Label, withSidebarButtons: bool): KosmoStat
     let item = nimkit.newMenuItem(mode.title)
     item.identifier = mode.identifier
     menu.addItem(item)
-  result = KosmoStatusBar(label: label, keyModeChoice: choice)
+  result = KosmoStatusBar(
+    label: label,
+    keyModeChoice: choice,
+    indexProgress: indexProgress,
+    indexSpinner: indexSpinner,
+    indexProgressLabel: indexProgressLabel,
+    indexEntryLabel: indexEntryLabel,
+  )
   result.initViewFields()
   result.addSubview(label)
   result.addSubview(choice)
+  result.addSubview(indexProgress)
+  result.addSubview(indexSpinner)
+  result.addSubview(indexProgressLabel)
+  result.addSubview(indexEntryLabel)
   if withSidebarButtons:
     result.fileButton = newKosmoStatusIconButton(
       nimkit.newSvgMtsdfResource(KosmoFilesIconSvg, "kosmo-status-files"), "Files"

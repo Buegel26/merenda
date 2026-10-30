@@ -50,8 +50,8 @@ proc readHostClipboard(editor: KosmoEditor) =
       # Preserve linewise metadata when reading back our own write. An empty
       # external clipboard must clear the cached register as well.
       if some(text) != editor.clipboardValues[selection]:
-        registers.setClipboardRegister(
-          selection.clipboardRegister, text, text.endsWith("\n")
+        registers.storeYanked(
+          some(selection.clipboardRegister), text, text.endsWith("\n")
         )
       editor.clipboardValues[selection] = some(text)
     except CatchableError as error:
@@ -131,6 +131,7 @@ proc jobsText*(editor: KosmoEditor, stop = false): string =
 proc visibleFrontendFingerprint(editor: KosmoEditor): Hash =
   let engine = editor.editor
   result = hash($engine.frontendStatus())
+  result = result !& hash(editor.status().message)
   result = result !& hash(engine.frontendGitStatusRevision())
   result = result !& hash(engine.state.ui.lspProgressText)
   result = result !& hash($editor.popupMenu())
@@ -343,6 +344,7 @@ proc pollFrontendWork*(editor: KosmoEditor): bool =
   editor.pollingWork = true
   defer:
     editor.pollingWork = false
+  let previousBuffer = editor.activeBufferId()
   result = editor.pollKeyMappingTimeout()
   editor.inWorkingDirectory:
     # Terminal-only operations never enter the TUI's blocking suspend path.
@@ -367,7 +369,10 @@ proc pollFrontendWork*(editor: KosmoEditor): bool =
     moeAsync.asyncSpawn editor.editor.handlePendingAsyncOperations(FrontendHooks())
     nonblockingAsyncStep()
     editor.editor.tick()
+    discard editor.routeMoeMessages()
   editor.takeEngineOutput()
+  if editor.activeBufferId() != previousBuffer:
+    editor.frontendBufferChange = some(editor.captureViewState())
   editor.checkpointRecovery()
   let fingerprint = editor.visibleFrontendFingerprint()
   result =
@@ -375,3 +380,9 @@ proc pollFrontendWork*(editor: KosmoEditor): bool =
   if result:
     inc editor.xFrontendRevision
   editor.frontendFingerprint = fingerprint
+
+proc takeFrontendBufferChange*(editor: KosmoEditor): Option[KosmoEditorViewState] =
+  ## Return a buffer switch performed by asynchronous Moe work once.
+  if not editor.isNil:
+    result = editor.frontendBufferChange
+    editor.frontendBufferChange = none(KosmoEditorViewState)
