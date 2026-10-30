@@ -1529,7 +1529,14 @@ proc setVisible*(host: HostWindow, visible: bool) =
     return
   if visible and host.xNativeWindow.visible() and not host.xNativeWindow.focused() and
       getEnv("SIWIN_NO_ACTIVATE") != "1":
+    # Raising an already mapped window needs the unmap+remap below to make the
+    # window manager focus it. Remapping applies the window manager's placement
+    # again, so re-assert the window's actual position afterwards.
+    let savedPos = host.xNativeWindow.pos
     host.xNativeWindow.visible = false
+    host.xNativeWindow.visible = true
+    host.xNativeWindow.pos = savedPos
+    return
   host.xNativeWindow.visible = visible
 
 when defined(merenda.devControl):
