@@ -1968,7 +1968,7 @@ proc tabContextMenu(
       closeSelector = nimkit.actionSelector("kosmo.editorTabs.close")
       closeItem = nimkit.newMenuItem("Close", closeSelector)
     closeItem.validates = false
-    closeItem.enabled = item.closeable()
+    closeItem.enabled = view.documentTabs.canCloseDocumentTab(item)
     closeItem.target = nimkit.newActionTarget(closeSelector) do(
       sender: nimkit.DynamicAgent
     ):
