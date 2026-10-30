@@ -2019,6 +2019,10 @@ proc createHostWindow*(
     result.xNativeWindow.visible = true
   else:
     result.xNativeWindow.firstStep()
+  # Re-assert the requested frame origin after mapping: the window manager
+  # applies its own placement when a window is mapped and ignores the position
+  # an app set before the window became visible.
+  result.xNativeWindow.pos = ivec2(frame.origin.x.int32, frame.origin.y.int32)
   result.xNativeWindow.refreshUiScale(result.xAutoScale)
   result.xReady = true
   when defined(windows) and figrender.UseVulkanBackend and
