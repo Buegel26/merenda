@@ -1,6 +1,7 @@
-import std/[sequtils, options, os, strutils, tempfiles, times, unittest]
+import std/[sequtils, options, os, strutils, tempfiles, times, unicode, unittest]
 
 import figdraw
+from celina/core/colors import `==`
 import sigils/threads
 
 import merenda/nimkit
@@ -291,6 +292,20 @@ suite "Kosmo":
     check "λ" in buffer.renderedText
     editor.close()
 
+  test "auto-indented empty lines do not highlight trailing spaces":
+    let editor = newKosmoEditor(text = "  value")
+    defer:
+      editor.close()
+    var buffer = newRenderBuffer(32, 8)
+    editor.render(buffer)
+    require editor.handleKey("o")
+    editor.render(buffer)
+    check editor.bufferCursor() == KosmoBufferCursor(line: 1, column: 2)
+    let cursor = editor.cursor()
+    require cursor.column > 1
+    check buffer.cell(cursor.column - 1, cursor.row).style.bg ==
+      buffer.cell(cursor.column + 1, cursor.row).style.bg
+
   test "force input mode keeps editable buffers out of Normal mode":
     let editor = newKosmoEditor()
     defer:
@@ -426,6 +441,39 @@ suite "Kosmo":
     check frontend.editorView.editor.bufferText(activeTab.id) == some("one\ntwo\nthree")
     check frontend.editorView.editor.bufferCursor() ==
       KosmoBufferCursor(line: 2, column: 5)
+
+  test "completion popup remains anchored at the member dot while cycling":
+    for (prefix, anchorColumn, width) in [
+      ("context.", 7, 80),
+      ("context.splitV", 7, 80),
+      ("\t界context.splitV", 9, 80),
+      ("abcdefghijkl.context.splitV", 20, 24),
+      ("splitV", 0, 80),
+    ]:
+      let editor = newKosmoEditor(text = "splitView splitVisible splitWidth\n" & prefix)
+      defer:
+        editor.close()
+      var grid = newRenderBuffer(width, 12)
+      require editor.revealLocation(1, anchorColumn)
+      editor.render(grid)
+      let expected = editor.cursor()
+      require editor.revealLocation(1, prefix.runeLen - 1)
+      require editor.handleKey("a")
+      editor.render(grid)
+      require editor.handleKey("C-p")
+      editor.render(grid)
+      require editor.popupMenu().isSome
+      let initial = editor.popupMenu().get
+      check initial.kind == KosmoPopupMenuKind.Completion
+      check initial.anchorRow == expected.row
+      check initial.anchorColumn == expected.column
+      for key in ["C-n", "C-n", "C-p"]:
+        require editor.handleKey(key)
+        editor.render(grid)
+        require editor.popupMenu().isSome
+        let popup = editor.popupMenu().get
+        check popup.anchorRow == expected.row
+        check popup.anchorColumn == expected.column
 
   test "command completion cycles with Tab and Shift-Tab in the host popup":
     let frontend =
@@ -838,6 +886,31 @@ suite "Kosmo":
     check view.clipsToBounds
     editor.close()
 
+  test "cursor movement keeps the last line fully visible above the pane edge":
+    var lines: seq[string]
+    for index in 0 ..< 30:
+      lines.add "line " & $index
+    let
+      editor = newKosmoEditor(text = lines.join("\n"))
+      view = newKosmoEditorView(editor)
+      metrics = view.monoTextMetrics()
+    defer:
+      editor.close()
+    view.frame = rect(0, 0, metrics.cellWidth * 20, metrics.lineHeight * 3.5'f32)
+    view.refresh()
+    for height in [3.0'f32, 3.5'f32]:
+      view.frame = rect(0, 0, metrics.cellWidth * 20, metrics.lineHeight * height)
+      require editor.revealLocation(lines.high - 1, 0)
+      view.refresh()
+      require editor.handleKey("Esc")
+      require editor.handleKey("j")
+      view.refresh()
+      check editor.bufferCursor().line == lines.high
+      check editor.cursor().visible
+      check (editor.cursor().row + 1).float32 * metrics.lineHeight <=
+        view.bounds().size.height
+      check "line 29" in view.displayedText()
+
   test "editor view follows Moe's rendered cursor position":
     let
       editor = newKosmoEditor(text = "hello")
@@ -910,7 +983,7 @@ suite "Kosmo":
     let lineSelection = editor.currentSelection()
     require lineSelection.isSome
     check lineSelection.get.kind == KosmoSelectionKind.Line
-    check editor.selectedText() == "second line"
+    check editor.selectedText() == "second line\n"
 
     let caret = view.pointForBufferPosition(0, 2)
     check frontend.window.mouseDownAt(caret.point, clickCount = 1)

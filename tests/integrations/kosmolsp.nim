@@ -12,12 +12,12 @@ from moepkg/lsp/worker import pathToFileUri
 
 type
   TcpLspSession = object
-    rootUri, documentUri, text: string
+    rootUri, documentUri, targetUri, text: string
 
   TcpLspFixture = object
     listener: SocketHandle
     sessions: seq[TcpLspSession]
-    initialized, opened, disconnected: Atomic[int]
+    initialized, opened, disconnected, finishProgress: Atomic[int]
     finished, stop: Atomic[bool]
     failure: string
 
@@ -27,16 +27,29 @@ proc serveLsp(state: ptr TcpLspFixture) {.thread.} =
   var session = 0
   try:
     var parser = initJsonRpcFrameParser()
+    var progressEnded = 0
     var buffer: array[8192, char]
     let deadline = getMonoTime() + initDuration(seconds = 60)
     while not state.stop.load() and getMonoTime() < deadline:
-      var readable =
-        @[
-          if client.isNil:
-            listener.getFd()
-          else:
-            client.getFd()
-        ]
+      if not client.isNil and state.finishProgress.load() > progressEnded:
+        client.send(
+          frameJsonRpcMessage(
+            $(
+              %*{
+                "jsonrpc": "2.0",
+                "method": "$/progress",
+                "params": {"token": "index", "value": {"kind": "end"}},
+              }
+            )
+          )
+        )
+        inc progressEnded
+      var readable = @[
+        if client.isNil:
+          listener.getFd()
+        else:
+          client.getFd()
+      ]
       if selectRead(readable, 20) > 0:
         if client.isNil:
           listener.accept(client)
@@ -67,33 +80,83 @@ proc serveLsp(state: ptr TcpLspFixture) {.thread.} =
                       message["params"]["rootUri"].getStr() & " expected " &
                       state.sessions[session].rootUri,
                   )
-                response =
-                  %*{
-                    "jsonrpc": "2.0",
-                    "id": message["id"],
-                    "result": {
-                      "capabilities": {
-                        "textDocumentSync":
-                          {"openClose": true, "change": 1, "save": true},
-                        "positionEncoding": "utf-16",
-                        "experimental": {"padding": repeat('x', 32768)},
-                      },
-                      "serverInfo": {"name": "nimdex", "version": "0.1.2"},
+                response = %*{
+                  "jsonrpc": "2.0",
+                  "id": message["id"],
+                  "result": {
+                    "capabilities": {
+                      "textDocumentSync": {"openClose": true, "change": 1, "save": true},
+                      "definitionProvider": true,
+                      "positionEncoding": "utf-16",
+                      "experimental": {"padding": repeat('x', 32768)},
                     },
-                  }
+                    "serverInfo": {"name": "nimdex", "version": "0.1.2"},
+                  },
+                }
                 state.initialized.store(session + 1)
               of "textDocument/didOpen":
                 let document = message["params"]["textDocument"]
                 let expected = state.sessions[session]
-                if document["uri"].getStr() != expected.documentUri or
-                    document["text"].getStr() != expected.text:
-                  raise newException(
-                    ValueError,
-                    "TCP LSP didOpen mismatch: URI " & document["uri"].getStr() &
-                      " expected " & expected.documentUri & "; text length " &
-                      $document["text"].getStr().len & " expected " & $expected.text.len,
+                if document["uri"].getStr() == expected.documentUri:
+                  if document["text"].getStr() != expected.text:
+                    raise newException(
+                      ValueError,
+                      "TCP LSP didOpen mismatch: URI " & document["uri"].getStr() &
+                        " expected " & expected.documentUri & "; text length " &
+                        $document["text"].getStr().len & " expected " &
+                        $expected.text.len,
+                    )
+                  client.send(
+                    frameJsonRpcMessage(
+                      $(
+                        %*{
+                          "jsonrpc": "2.0",
+                          "method": "$/progress",
+                          "params": {
+                            "token": "index",
+                            "value": {
+                              "kind": "begin",
+                              "title": "Nimdex indexing",
+                              "percentage": 42,
+                              "message":
+                                "12.34% kosmo.nim: 25 project files encountered (of 200)",
+                            },
+                          },
+                        }
+                      )
+                    )
                   )
-                state.opened.store(session + 1)
+                  client.send(
+                    frameJsonRpcMessage(
+                      $(
+                        %*{
+                          "jsonrpc": "2.0",
+                          "method": "window/showMessage",
+                          "params":
+                            {"type": 1, "message": "test server notification marker"},
+                        }
+                      )
+                    )
+                  )
+                  state.opened.store(session + 1)
+              of "textDocument/definition":
+                let position = message["params"]["position"]["line"].getInt()
+                let uri =
+                  if position == 0:
+                    state.sessions[session].documentUri
+                  else:
+                    state.sessions[session].targetUri
+                response = %*{
+                  "jsonrpc": "2.0",
+                  "id": message["id"],
+                  "result": {
+                    "uri": uri,
+                    "range": {
+                      "start": {"line": 40, "character": 0},
+                      "end": {"line": 40, "character": 1},
+                    },
+                  },
+                }
               of "shutdown":
                 response = %*{"jsonrpc": "2.0", "id": message["id"], "result": nil}
               else:
@@ -153,11 +216,17 @@ suite "Kosmo TCP LSP integration":
       let
         directory = root / $session
         path = directory / "main.nim"
-        text = "const answer" & $session & "* = 42\n# " & repeat('a', 32768)
+        text =
+          "const answer" & $session & "* = 42\n" & repeat("# line\n", 100) & "# " &
+          repeat('a', 32768)
       createDir(directory)
       writeFile(path, text)
+      writeFile(directory / "target.nim", repeat("# target\n", 100))
       state.sessions.add TcpLspSession(
-        rootUri: pathToFileUri(directory), documentUri: pathToFileUri(path), text: text
+        rootUri: pathToFileUri(directory),
+        documentUri: pathToFileUri(path),
+        targetUri: pathToFileUri(directory / "target.nim"),
+        text: text,
       )
     var serverThread: Thread[ptr TcpLspFixture]
     var serverJoined: bool
@@ -177,12 +246,12 @@ suite "Kosmo TCP LSP integration":
     let deadline = getMonoTime() + initDuration(seconds = 60)
     for session in 0 ..< state.sessions.len:
       let directory = root / $session
-      editor = newKosmoEditor(
-        workingDirectory = directory,
-        nimLspCommand = "tcp://127.0.0.1:" & $listener.getLocalAddr()[1],
-      )
+      editor = newKosmoEditor(workingDirectory = directory)
       check getCurrentDir() == previousDirectory
       require editor.openFile(directory / "main.nim").loaded
+      check editor.nimdexConnectionStatus() == "Disconnected"
+      require editor.connectNimdex("tcp://127.0.0.1:" & $listener.getLocalAddr()[1]) ==
+        ""
       while state.opened.load() <= session and not state.finished.load() and
           getMonoTime() < deadline:
         discard getCurrentSigilThread().pollAll(NonBlocking)
@@ -194,6 +263,46 @@ suite "Kosmo TCP LSP integration":
         check state.failure == ""
       require state.initialized.load() == session + 1
       require state.opened.load() == session + 1
+      check editor.nimdexConnectionStatus() == "Connected"
+      while not editor.nimdexProgress().active and getMonoTime() < deadline:
+        discard getCurrentSigilThread().pollAll(NonBlocking)
+        editor.render(render)
+        sleep(5)
+      require editor.nimdexProgress().active
+      check editor.nimdexProgress().percentage == 42
+      check editor.nimdexProgress().hundredths == 1234
+      check editor.nimdexProgress().entryPoint == "kosmo.nim"
+      while "test server notification marker" notin editor.status().message and
+          getMonoTime() < deadline:
+        discard getCurrentSigilThread().pollAll(NonBlocking)
+        editor.render(render)
+        sleep(5)
+      check "test server notification marker" in editor.status().message
+      var rendered = ""
+      for row in 0 ..< render.height:
+        for column in 0 ..< render.width:
+          rendered.add(render.cell(column, row).symbol)
+        rendered.add('\n')
+      check "test server notification marker" notin rendered
+      for expectedMessage in ["Definition at line 41", "Definition in "]:
+        require editor.handleKey("g")
+        require editor.handleKey("d")
+        while not editor.status().message.startsWith(expectedMessage) and
+            getMonoTime() < deadline:
+          discard getCurrentSigilThread().pollAll(NonBlocking)
+          editor.render(render)
+          sleep(5)
+        require editor.status().message.startsWith(expectedMessage)
+        check editor.bufferCursor().line == 40
+        check abs(editor.cursor().row - render.height div 2) <= 1
+      state.finishProgress.store(session + 1)
+      while editor.nimdexProgress().active and getMonoTime() < deadline:
+        discard getCurrentSigilThread().pollAll(NonBlocking)
+        editor.render(render)
+        sleep(5)
+      check not editor.nimdexProgress().active
+      editor.disconnectNimdex()
+      check editor.nimdexConnectionStatus() == "Disconnected"
       editor.close()
       editor = nil
       while state.disconnected.load() <= session and not state.finished.load() and

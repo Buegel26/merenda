@@ -1,6 +1,6 @@
 ## Kosmo-specific application settings.
 
-import std/strutils
+import std/[os, strutils]
 
 import ../nimkit as nimkit
 import ./moe
@@ -15,6 +15,7 @@ export shortcuts
 export terminalinput.KosmoTerminalInputPolicy
 
 const
+  KosmoNimdexSettingsTabIdentifier* = "kosmo.settings.nimdex"
   KosmoSettingsTabsIdentifier* = "kosmo.settings.tabs"
   KosmoTerminalSettingsTabIdentifier* = "kosmo.settings.terminal"
   KosmoShortcutsSettingsTabIdentifier* = "kosmo.settings.shortcuts"
@@ -66,6 +67,10 @@ type
     All
     Moe
     Terminal
+    RichText
+    Markdown
+    GitDiff
+    GitHub
 
   KosmoMoeThemeHandler* =
     proc(identifier: string, target: KosmoThemeTarget): bool {.closure.}
@@ -93,7 +98,7 @@ type
   KosmoMoeThemesTableSource = ref object of nimkit.Responder
     themes: seq[KosmoMoeThemeSetting]
     selectedIdentifier: string
-    editorIdentifier, terminalIdentifier: string
+    identifiers: array[KosmoThemeTarget, string]
     target: KosmoThemeTarget
     handler: KosmoMoeThemeHandler
 
@@ -116,6 +121,9 @@ type
     xTerminalInputPolicyChoice: nimkit.ComboBox
     xTerminalInputPolicyHandler: KosmoTerminalInputPolicyHandler
     xTabs: nimkit.TabView
+    xNimdexStatus: nimkit.Label
+    xNimdexStatusError: bool
+    xNimdexStatusHandler: proc(): string {.closure.}
     xShortcutsTable: nimkit.TableView
     xShortcutsSource: KosmoShortcutsTableSource
     xShortcutProfileChoice: nimkit.ComboBox
@@ -284,6 +292,33 @@ protocol KosmoMoeThemesTableDataSource of nimkit.TableViewDataSource:
         return row
     -1
 
+func themeTargetIncludes*(target, item: KosmoThemeTarget): bool =
+  ## Whether applying a theme to target includes the individual item.
+  case target
+  of KosmoThemeTarget.All:
+    item in {
+      KosmoThemeTarget.Moe, KosmoThemeTarget.Terminal, KosmoThemeTarget.Markdown,
+      KosmoThemeTarget.GitDiff, KosmoThemeTarget.GitHub,
+    }
+  of KosmoThemeTarget.RichText:
+    item in
+      {KosmoThemeTarget.Markdown, KosmoThemeTarget.GitDiff, KosmoThemeTarget.GitHub}
+  else:
+    item == target
+
+func targetIdentifier(source: KosmoMoeThemesTableSource): string =
+  var first = true
+  for item in [
+    KosmoThemeTarget.Moe, KosmoThemeTarget.Terminal, KosmoThemeTarget.Markdown,
+    KosmoThemeTarget.GitDiff, KosmoThemeTarget.GitHub,
+  ]:
+    if source.target.themeTargetIncludes(item):
+      if first:
+        result = source.identifiers[item]
+        first = false
+      elif result != source.identifiers[item]:
+        return ""
+
 protocol KosmoMoeThemesTableDelegate of nimkit.TableViewDelegate:
   method viewForCell(
       source: KosmoMoeThemesTableSource,
@@ -310,10 +345,9 @@ protocol KosmoMoeThemesTableDelegate of nimkit.TableViewDelegate:
       applied = source.handler(identifier, source.target)
     if applied:
       source.selectedIdentifier = identifier
-      if source.target in {KosmoThemeTarget.All, KosmoThemeTarget.Moe}:
-        source.editorIdentifier = identifier
-      if source.target in {KosmoThemeTarget.All, KosmoThemeTarget.Terminal}:
-        source.terminalIdentifier = identifier
+      for item in KosmoThemeTarget:
+        if source.target.themeTargetIncludes(item):
+          source.identifiers[item] = identifier
     else:
       tableView.selectedIndex = tableView.tableRowIndexForIdentifier(previousIdentifier)
 
@@ -648,29 +682,26 @@ proc updateMoeThemes*(
     themes: openArray[KosmoMoeThemeSetting],
     selectedIdentifier: string,
     terminalIdentifier = "",
+    markdownIdentifier = "",
+    gitDiffIdentifier = "",
+    gitHubIdentifier = "",
 ) =
   ## Replace the available Moe themes and synchronize the current selection.
   if settings.isNil or settings.xMoeThemesSource.isNil or settings.xMoeThemesTable.isNil:
     return
   settings.xMoeThemesSource.themes = @themes
-  settings.xMoeThemesSource.editorIdentifier = selectedIdentifier
-  settings.xMoeThemesSource.terminalIdentifier =
+  let source = settings.xMoeThemesSource
+  source.identifiers[KosmoThemeTarget.Moe] = selectedIdentifier
+  source.identifiers[KosmoThemeTarget.Terminal] =
     if terminalIdentifier.len > 0:
       terminalIdentifier
     else:
       KosmoMoeDefaultThemeIdentifier
+  source.identifiers[KosmoThemeTarget.Markdown] = markdownIdentifier
+  source.identifiers[KosmoThemeTarget.GitDiff] = gitDiffIdentifier
+  source.identifiers[KosmoThemeTarget.GitHub] = gitHubIdentifier
   settings.xMoeThemesTable.reloadData()
-  let identifier =
-    case settings.xMoeThemesSource.target
-    of KosmoThemeTarget.Moe:
-      selectedIdentifier
-    of KosmoThemeTarget.Terminal:
-      settings.xMoeThemesSource.terminalIdentifier
-    of KosmoThemeTarget.All:
-      if selectedIdentifier == settings.xMoeThemesSource.terminalIdentifier:
-        selectedIdentifier
-      else:
-        ""
+  let identifier = source.targetIdentifier()
   let selectedRow = settings.xMoeThemesTable.tableRowIndexForIdentifier(identifier)
   settings.xMoeThemesSource.selectedIdentifier =
     if selectedRow >= 0:
@@ -690,6 +721,9 @@ proc `textMateGrammars=`*(
   settings.xTextMateGrammarsTable.reloadData()
 
 proc newKosmoSettingsWindow*(
+    nimdexCommand = "",
+    nimdexAction: proc(command: string, connect: bool): string {.closure.} = nil,
+    nimdexStatus: proc(): string {.closure.} = nil,
     preferEditorPanes = true,
     preferEditorPanesHandler: proc(enabled: bool) {.closure.} = nil,
     optionAsMeta = true,
@@ -708,6 +742,9 @@ proc newKosmoSettingsWindow*(
     moeThemes: openArray[KosmoMoeThemeSetting] = [],
     selectedMoeThemeIdentifier = "",
     selectedTerminalThemeIdentifier = "",
+    selectedMarkdownThemeIdentifier = "",
+    selectedGitDiffThemeIdentifier = "",
+    selectedGitHubThemeIdentifier = "",
     moeThemeHandler: KosmoMoeThemeHandler = nil,
     textMateGrammars: openArray[KosmoTextMateGrammar] = [],
 ): KosmoSettingsWindow =
@@ -718,6 +755,7 @@ proc newKosmoSettingsWindow*(
     textMateGrammarsSource = newKosmoTextMateGrammarsTableSource(textMateGrammars)
     vscodeGrammarSearchSource = newKosmoVscodeGrammarSearchTableSource()
   result = KosmoSettingsWindow(
+    xNimdexStatusHandler: nimdexStatus,
     xWindow: nimkit.newPanel("Kosmo Settings", nimkit.rect(180, 160, 760, 420)),
     xContentView: nimkit.newView(),
     xPreferEditorPanesHandler: preferEditorPanesHandler,
@@ -739,6 +777,15 @@ proc newKosmoSettingsWindow*(
     layout = nimkit.newStackView(nimkit.laVertical)
     tabs = nimkit.newTabView()
     terminalPage = newSettingsPage()
+    nimdexPage = newSettingsPage()
+    nimdexForm = nimkit.newFormView()
+    nimdexMode = nimkit.newComboBox(["Launch locally", "Connect to daemon"])
+    nimdexLocal = nimkit.newTextField()
+    nimdexAddress = nimkit.newTextField()
+    nimdexStatusLabel = nimkit.newLabel("Disconnected")
+    nimdexConnect = nimkit.newButton("Start / Connect")
+    nimdexDisconnect = nimkit.newButton("Stop / Disconnect")
+    nimdexButtons = nimkit.newStackView(nimkit.laHorizontal)
     shortcutsPage = newSettingsPage()
     moeThemesPage = newSettingsPage()
     textMateGrammarsPage = newSettingsPage()
@@ -760,10 +807,9 @@ proc newKosmoSettingsWindow*(
     shortcutsForm = nimkit.newFormView()
     shortcutsTable = nimkit.newTableView()
     moeThemesTable = nimkit.newTableView()
-    themeTargets = nimkit.newStackView(nimkit.laHorizontal)
-    allThemesButton = nimkit.newRadioButton("All")
-    moeThemesButton = nimkit.newRadioButton("Moe")
-    terminalThemesButton = nimkit.newRadioButton("Terminal")
+    themeTargets = nimkit.newComboBox(
+      ["All", "Moe", "Terminal", "Rich Text", "Markdown", "Git Diff", "GitHub"]
+    )
     textMateGrammarsTable = nimkit.newTableView()
     vscodeGrammarSearchField = nimkit.newTextField()
     vscodeGrammarSearchButton = nimkit.newButton("Search Repository")
@@ -1041,47 +1087,25 @@ proc newKosmoSettingsWindow*(
   moeThemesTable.dataSource = moeThemesSource
   moeThemesTable.delegate = moeThemesSource
   settings.updateMoeThemes(
-    moeThemes, selectedMoeThemeIdentifier, selectedTerminalThemeIdentifier
+    moeThemes, selectedMoeThemeIdentifier, selectedTerminalThemeIdentifier,
+    selectedMarkdownThemeIdentifier, selectedGitDiffThemeIdentifier,
+    selectedGitHubThemeIdentifier,
   )
   themeTargets.identifier = KosmoThemeTargetIdentifier
-  themeTargets.spacing = 12.0
-  let targetButtons = [allThemesButton, moeThemesButton, terminalThemesButton]
-  proc themeTargetAction(
-      target: KosmoThemeTarget
-  ): proc(sender: nimkit.DynamicAgent) {.closure.} =
-    result = proc(sender: nimkit.DynamicAgent) =
-      discard sender
-      moeThemesSource.target = target
-      for item in KosmoThemeTarget:
-        targetButtons[item.ord].state =
-          if item == target: nimkit.bsOn else: nimkit.bsOff
-      let identifier =
-        case target
-        of KosmoThemeTarget.Moe:
-          moeThemesSource.editorIdentifier
-        of KosmoThemeTarget.Terminal:
-          moeThemesSource.terminalIdentifier
-        of KosmoThemeTarget.All:
-          if moeThemesSource.editorIdentifier == moeThemesSource.terminalIdentifier:
-            moeThemesSource.editorIdentifier
-          else:
-            ""
+  themeTargets.accessibilityLabel = "Theme target"
+  themeTargets.selectedIndex = KosmoThemeTarget.All.ord
+  let themeTargetChanged = nimkit.actionSelector("kosmo.themeTargetChanged")
+  themeTargets.target = nimkit.newActionTarget(themeTargetChanged) do(
+    sender: nimkit.DynamicAgent
+  ):
+    discard sender
+    if themeTargets.selectedIndex in 0 .. ord(high(KosmoThemeTarget)):
+      moeThemesSource.target = KosmoThemeTarget(themeTargets.selectedIndex)
+      let identifier = moeThemesSource.targetIdentifier()
       moeThemesSource.selectedIdentifier = identifier
       moeThemesTable.selectedIndex =
         moeThemesTable.tableRowIndexForIdentifier(identifier)
-
-  for target in KosmoThemeTarget:
-    let
-      button = targetButtons[target.ord]
-      action = nimkit.actionSelector("kosmo.themeTarget" & $target)
-    button.identifier = KosmoThemeTargetIdentifier & "." & $target
-    button.state = if target == KosmoThemeTarget.All: nimkit.bsOn else: nimkit.bsOff
-    button.target = nimkit.newActionTarget(action, themeTargetAction(target))
-    button.action = action
-    themeTargets.addArrangedSubview(button)
-  if moeThemesSource.editorIdentifier != moeThemesSource.terminalIdentifier:
-    moeThemesSource.selectedIdentifier = ""
-    moeThemesTable.selectedIndex = -1
+  themeTargets.action = themeTargetChanged
   moeThemesPage.stack.addArrangedSubview(
     nimkit.newHeadingLabel("Themes"),
     nimkit.newLabel(
@@ -1141,6 +1165,64 @@ proc newKosmoSettingsWindow*(
   )
   textMateGrammarsPage.stack.fillAvailableSpace(textMateGrammarsTable)
 
+  nimdexMode.identifier = "kosmo.settings.nimdex.mode"
+  nimdexLocal.identifier = "kosmo.settings.nimdex.local"
+  nimdexAddress.identifier = "kosmo.settings.nimdex.address"
+  nimdexStatusLabel.identifier = "kosmo.settings.nimdex.status"
+  nimdexConnect.identifier = "kosmo.settings.nimdex.connect"
+  nimdexDisconnect.identifier = "kosmo.settings.nimdex.disconnect"
+  nimdexMode.selectedIndex = if nimdexCommand.startsWith("tcp://"): 1 else: 0
+  nimdexLocal.text = if nimdexMode.selectedIndex == 0: nimdexCommand else: ""
+  nimdexAddress.text =
+    if nimdexMode.selectedIndex == 1: nimdexCommand else: "tcp://127.0.0.1:9257"
+  settings.xNimdexStatus = nimdexStatusLabel
+  nimdexForm.edgeInsets = nimkit.insets(0.0)
+  nimdexForm.spacing[nimkit.dcol] = 12.0
+  nimdexForm.spacing[nimkit.drow] = 8.0
+  nimdexForm.addRow(nimkit.newFormLabel("Mode"), nimdexMode)
+  nimdexForm.addRow(nimkit.newFormLabel("Executable or command"), nimdexLocal)
+  nimdexForm.addRow(nimkit.newFormLabel("Daemon address"), nimdexAddress)
+  nimdexButtons.spacing = 8.0
+  nimdexButtons.alignment = nimkit.svaCenter
+  nimdexButtons.addArrangedSubview(nimdexConnect, nimdexDisconnect)
+  nimdexConnect.target = nimkit.newActionTarget(
+    nimkit.actionSelector("kosmo.nimdex.connect")
+  ) do(sender: nimkit.DynamicAgent):
+    discard sender
+    var command =
+      if nimdexMode.selectedIndex == 1:
+        nimdexAddress.text.strip()
+      else:
+        nimdexLocal.text.strip()
+    if nimdexMode.selectedIndex == 0 and command.len > 0 and
+        (fileExists(command) or not command.contains(' ')):
+      command = quoteShell(command) & " daemon"
+    if not nimdexAction.isNil:
+      let error = nimdexAction(command, true)
+      settings.xNimdexStatusError = error.len > 0
+      nimdexStatusLabel.text = if error.len > 0: error else: "Connecting…"
+  nimdexConnect.action = nimkit.actionSelector("kosmo.nimdex.connect")
+  nimdexDisconnect.target = nimkit.newActionTarget(
+    nimkit.actionSelector("kosmo.nimdex.disconnect")
+  ) do(sender: nimkit.DynamicAgent):
+    discard sender
+    if not nimdexAction.isNil:
+      let error = nimdexAction("", false)
+      settings.xNimdexStatusError = error.len > 0
+      nimdexStatusLabel.text = if error.len > 0: error else: "Disconnected"
+  nimdexDisconnect.action = nimkit.actionSelector("kosmo.nimdex.disconnect")
+  nimdexPage.stack.addArrangedSubview(
+    nimkit.newHeadingLabel("Nimdex"),
+    nimdexForm,
+    nimdexButtons,
+    nimdexStatusLabel,
+    nimkit.newLabel(
+      "Local mode starts Nimdex for this editor; daemon mode connects to an existing listener."
+    ),
+  )
+  if not nimdexStatus.isNil:
+    nimdexStatusLabel.text = nimdexStatus()
+
   tabs.identifier = KosmoSettingsTabsIdentifier
   discard tabs.addTabViewItem(
     nimkit.newTabViewItem(
@@ -1163,6 +1245,9 @@ proc newKosmoSettingsWindow*(
       KosmoTextMateGrammarsSettingsTabIdentifier,
     )
   )
+  discard tabs.addTabViewItem(
+    nimkit.newTabViewItem("Nimdex", nimdexPage.view, KosmoNimdexSettingsTabIdentifier)
+  )
   layout.spacing = 12.0
   layout.alignment = nimkit.svaFill
   layout.addArrangedSubview(nimkit.newTitleLabel("Kosmo Settings"))
@@ -1175,6 +1260,14 @@ proc newKosmoSettingsWindow*(
   result.xWindow.styleMask = result.xWindow.styleMask + {nimkit.wsmResizable}
   result.xWindow.contentMinSize =
     nimkit.initSize(KosmoSettingsMinimumWidth, KosmoSettingsMinimumHeight)
+
+proc refreshNimdexStatus*(settings: KosmoSettingsWindow) =
+  ## Refresh the connection indicator from the editor worker.
+  if not settings.isNil and not settings.xNimdexStatusError and
+      not settings.xNimdexStatusHandler.isNil:
+    let status = settings.xNimdexStatusHandler()
+    if settings.xNimdexStatus.text != status:
+      settings.xNimdexStatus.text = status
 
 proc window*(settings: KosmoSettingsWindow): nimkit.Panel =
   ## Return the settings panel window.

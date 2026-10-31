@@ -9,6 +9,13 @@
   the clicked one and resumes after an accepted unsaved-changes confirmation, and
   the duplicate options split the clicked etab's editor and file into a new pane
   to the right or below. Clicks outside a tab keep the standard dispatch.
+- Display multiline, styled language-server hover information in editor tooltips.
+
+- Show language-server hover information in editor tooltips without moving the cursor.
+
+- Configure and connect Nimdex from Kosmo Settings.
+
+- Show Nimdex indexing progress beside the editor input mode selector.
 
 - Bundle dark and light Moe themes from ten popular Neovim theme families, plus Solarized.
 
