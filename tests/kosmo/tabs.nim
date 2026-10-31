@@ -1355,16 +1355,21 @@ suite "Kosmo tab context menu":
     let dirtyIdentifier = tabs[1].identifier()
     let tabPoint = tabs.pointToWindow(tabs.documentTabRect(0).center())
 
-    # With closing disabled for the strip, the dirty tab neither prompts nor
-    # closes and the batch stops.
+    # With closing disabled for the strip, the Close menu item is disabled and
+    # the popup initially highlights "Close others". Activating it neither
+    # prompts nor closes and the batch stops.
     block stripClosingDisabled:
       tabs.allowsClosing = false
       require frontend.window.rightMouseDownAt(tabPoint)
       let popupButton = frontend.contentView.contextPopupIn()
       require not popupButton.isNil
-      require popupButton.dispatchPopupKeyDown(
-        KeyEvent(key: keyArrowDown, keyCode: keyArrowDown.ord)
-      )
+      # The Close menu item uses the same eligibility check as the close
+      # operation and is disabled while closing is unavailable.
+      let menu = frontend.contentView.contextMenuIn()
+      require not menu.isNil
+      let closeItem = menu.menuItemForAction("kosmo.editorTabs.close")
+      require not closeItem.isNil
+      check not closeItem.enabled
       require popupButton.dispatchPopupKeyDown(
         KeyEvent(key: keyEnter, keyCode: keyEnter.ord)
       )
@@ -1374,7 +1379,10 @@ suite "Kosmo tab context menu":
       check frontend.editorView.editor.tabs()[1].modified
       tabs.allowsClosing = true
 
-    # With the dirty tab item not closeable, the same restrictions hold.
+    # With the dirty tab item not closeable, the clicked etab is still
+    # closeable, so the Close menu item stays enabled; activating the
+    # highlighted "Close others" keeps every tab because the batch stops at
+    # the etab that is not closeable.
     block dirtyTabNotCloseable:
       let item = tabs.documentTabItemWithIdentifier(dirtyIdentifier)
       require not item.isNil
@@ -1382,6 +1390,13 @@ suite "Kosmo tab context menu":
       require frontend.window.rightMouseDownAt(tabPoint)
       let popupButton = frontend.contentView.contextPopupIn()
       require not popupButton.isNil
+      # The same eligibility check keeps the Close menu item enabled for the
+      # clicked etab, which is closeable, even though the dirty etab is not.
+      let menu = frontend.contentView.contextMenuIn()
+      require not menu.isNil
+      let closeItem = menu.menuItemForAction("kosmo.editorTabs.close")
+      require not closeItem.isNil
+      check closeItem.enabled
       require popupButton.dispatchPopupKeyDown(
         KeyEvent(key: keyArrowDown, keyCode: keyArrowDown.ord)
       )
