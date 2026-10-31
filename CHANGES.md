@@ -9,6 +9,11 @@
   the clicked one and resumes after an accepted unsaved-changes confirmation, and
   the duplicate options split the clicked etab's editor and file into a new pane
   to the right or below. Clicks outside a tab keep the standard dispatch.
+- Add an experimental FigDraw software renderer switch for Siwin windows.
+- Publish a separate Windows software-rendered Kosmo build.
+- On Windows, probe Vulkan before transferring rendering to a worker and fall back
+  to OpenGL or software rendering when graphics initialization fails.
+
 - Display multiline, styled language-server hover information in editor tooltips.
 
 - Show language-server hover information in editor tooltips without moving the cursor.
