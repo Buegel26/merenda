@@ -61,6 +61,7 @@ proc applyInterfaceAppearance(frontend: KosmoApplication, window: nimkit.Window)
 proc openPath*(frontend: KosmoApplication, path: string): bool {.discardable.}
 proc show*(frontend: KosmoApplication)
 proc close*(frontend: KosmoApplication)
+proc requestQuit*(frontend: KosmoApplication)
 proc setEditorInputPolicy*(frontend: KosmoApplication, policy: KosmoEditorInputPolicy)
 proc setForceInputMode*(frontend: KosmoApplication, enabled: bool)
 proc syncKeyModeChoices(controller: KosmoDockController)
@@ -1913,6 +1914,21 @@ proc hasUnsavedData(controller: KosmoDockController, window: nimkit.Window): boo
       if document.modified:
         return true
 
+proc hasUnsavedData(controller: KosmoDockController): bool =
+  ## Return whether any editor pane of the controller reports unsaved changes.
+  if controller.isNil:
+    return
+  let tabs = controller.editor.tabs()
+  for group in controller.groups:
+    for tab in tabs:
+      if tab.modified and (
+        not group.editorView.usesBufferSubset or tab.id in group.editorView.bufferIds
+      ):
+        return true
+    for document in group.documents:
+      if document.modified:
+        return true
+
 proc bufferHasUnsavedData(controller: KosmoDockController, id: KosmoBufferId): bool =
   if controller.isNil:
     return
@@ -2552,7 +2568,7 @@ protocol KosmoEditorCommandDispatch of nimkit.ResponderCommandDispatchProtocol:
         discard controller.closeWindow(group.window)
     of KosmoQuitAction:
       if not controller.frontend.isNil:
-        discard controller.frontend[].application.terminate()
+        controller.frontend[].requestQuit()
     of KosmoPreviousTabAction:
       controller.selectRelativeTab(view, -1)
     of KosmoNextTabAction:
@@ -4243,7 +4259,7 @@ protocol KosmoEditorPaneCommandDispatch of nimkit.ResponderCommandDispatchProtoc
       discard controller.closeWindow(group.window)
     of KosmoQuitAction:
       if not controller.frontend.isNil:
-        discard controller.frontend[].application.terminate()
+        controller.frontend[].requestQuit()
     of KosmoPreviousTabAction:
       controller.selectRelativePaneTab(group, -1)
     of KosmoNextTabAction:
