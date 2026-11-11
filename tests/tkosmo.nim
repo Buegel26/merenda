@@ -25,6 +25,7 @@ import kosmo/matterhighlighting
 import kosmo/moelogging
 import kosmo/panelshortcuts
 import kosmo/quickopen
+import kosmo/quitsave
 import kosmo/search
 import kosmo/searchinput
 import kosmo/settings

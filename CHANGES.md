@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Review unsaved editors before quitting Kosmo. Quitting through the Kosmo
+  menu or the primary quit shortcut now opens a sheet offering to save every
+  unsaved editor tab, discard all changes, or cancel quitting. Save writes
+  each dirty editor with a file to that file and asks for a name for untitled
+  ones through a Save As panel; the first save that is cancelled or fails
+  stops quitting. Discard All leaves the files untouched and removes the
+  session's preserved recovery copies so nothing is offered for restore on
+  the next start. Quitting without unsaved editors terminates immediately.
+  Closing through the window-manager decoration (X, Alt+F4) is not guarded
+  yet; that needs a close-request veto in siwin.
 - Derive the Kosmo settings window's minimum height from its pages' measured
   content, so settings text is never squeezed below the resolved UI font's line
   height at the minimum window size. `KosmoSettingsMinimumHeight` remains the
