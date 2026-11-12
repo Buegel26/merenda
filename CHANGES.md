@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Guard the window-manager close button (X, Alt+F4) behind the unsaved-editor
+  review. Siwin now reports a close request through an ignorable
+  `CloseRequestEvent` before destroying the native window on every platform
+  (X11 WM_DELETE_WINDOW, Wayland xdg_toplevel and libdecor close, Win32
+  WM_CLOSE, Cocoa windowShouldClose:); without a handler the window closes as
+  before. NimKit forwards the request to the window delegate's existing
+  `windowShouldClose` review, so windows only close when the delegate agrees.
+  Kosmo's window lifecycles answer the request with the same Save/Discard/
+  Cancel sheet quitting uses: Save writes the closing window's editors,
+  asking for a name for untitled ones; Discard forgets the unsaved edits and
+  closes; Cancel keeps the window open. Closing a window through the Close
+  Window command routes through the same delegate review, and closing the
+  primary window now also reviews detached panes of that window's session.
 - Review unsaved editors before quitting Kosmo. Quitting through the Kosmo
   menu or the primary quit shortcut now opens a sheet offering to save every
   unsaved editor tab, discard all changes, or cancel quitting. Save writes
@@ -10,8 +23,6 @@
   stops quitting. Discard All leaves the files untouched and removes the
   session's preserved recovery copies so nothing is offered for restore on
   the next start. Quitting without unsaved editors terminates immediately.
-  Closing through the window-manager decoration (X, Alt+F4) is not guarded
-  yet; that needs a close-request veto in siwin.
 - Derive the Kosmo settings window's minimum height from its pages' measured
   content, so settings text is never squeezed below the resolved UI font's line
   height at the minimum window size. `KosmoSettingsMinimumHeight` remains the

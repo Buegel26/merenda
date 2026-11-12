@@ -130,6 +130,10 @@ type
     isModifierChange*: bool
 
   HostWindowCallbacks* = object
+    onCloseRequest*: proc(): bool {.closure.}
+      ## The user asked the host window to close through the window manager
+      ## (close button, alt+f4). Return false to keep the window open; without
+      ## the hook, or returning true, the window closes.
     onClose*: proc() {.closure.}
     onResize*: proc() {.closure.}
     onMove*: proc(pos: Point) {.closure.}
@@ -1843,6 +1847,11 @@ proc installEventHandlers(host: HostWindow) =
     return
   let ownerKey = host.xOwnerKey
   host.xNativeWindow.eventsHandler = siwinshim.WindowEventsHandler(
+    onCloseRequest: proc(event: siwinshim.CloseRequestEvent): bool =
+      let host = hostForNativeWindow(event.window, ownerKey)
+      if not host.isNil and not host.xCallbacks.onCloseRequest.isNil:
+        return host.xCallbacks.onCloseRequest()
+      true,
     onClose: proc(event: siwinshim.CloseEvent) =
       let host = hostForNativeWindow(event.window, ownerKey)
       if not host.isNil:

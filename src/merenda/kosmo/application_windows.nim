@@ -1103,8 +1103,8 @@ proc activeFrontend(manager: KosmoWindowManager): KosmoApplication =
         return manager.frontends[index]
 
 const
-  KosmoQuitSaveResponse = nimkit.PanelResponseOk
-  KosmoQuitDiscardResponse = 2
+  KosmoReviewSaveResponse = nimkit.PanelResponseOk
+  KosmoReviewDiscardResponse = 2
 
 proc sessionHasUnsavedData(manager: KosmoWindowManager): bool =
   ## Return whether any open frontend of the session reports unsaved changes.
@@ -1125,22 +1125,38 @@ proc groupForBuffer(
     if id in group.editorView.bufferIds:
       return group
 
-proc saveUnsavedEditorTabs(
-    controller: KosmoDockController, savePanel: nimkit.SavePanel = nil
-): bool =
-  ## Save every unsaved editor tab of the controller, asking for a file for the
-  ## untitled ones. The first save the user cancels or that fails stops the
-  ## review and returns false, leaving the session running.
+proc unsavedTabIds(
+    controller: KosmoDockController, window: nimkit.Window = nil
+): seq[KosmoBufferId] =
+  ## Return the unsaved editor tab identifiers of the controller, or only the
+  ## ones presented by `window` when given.
   if controller.isNil:
-    return true
-  var dirtyIds: seq[KosmoBufferId]
+    return
   let tabs = controller.editor.tabs()
   for group in controller.groups:
+    if not window.isNil and group.window != window:
+      continue
     for tab in tabs:
       if tab.modified and (
         not group.editorView.usesBufferSubset or tab.id in group.editorView.bufferIds
-      ) and tab.id notin dirtyIds:
-        dirtyIds.add tab.id
+      ) and tab.id notin result:
+        result.add tab.id
+
+proc saveUnsavedEditorTabs(
+    controller: KosmoDockController,
+    window: nimkit.Window = nil,
+    savePanel: nimkit.SavePanel = nil,
+): bool =
+  ## Save the controller's unsaved editor tabs — all of them, or only the ones
+  ## presented by `window` — asking for a file for the untitled ones. The first
+  ## save the user cancels or that fails stops the review and returns false,
+  ## leaving the window or session running.
+  if controller.isNil:
+    return true
+  let dirtyIds = controller.unsavedTabIds(window)
+  for group in controller.groups:
+    if not window.isNil and group.window != window:
+      continue
     for document in group.documents:
       if document.modified and not document.save():
         return false
@@ -1153,6 +1169,24 @@ proc saveUnsavedEditorTabs(
       return false
   true
 
+proc discardUnsavedEditorTabs(
+    controller: KosmoDockController, window: nimkit.Window = nil
+) =
+  ## Forget the unsaved edits of the controller's editor tabs — all of them,
+  ## or only the ones presented by `window` — so a reviewed close cannot lose
+  ## work the user chose to drop.
+  if controller.isNil:
+    return
+  for id in controller.unsavedTabIds(window):
+    controller.editor.markBufferSaved(id)
+  for group in controller.groups:
+    if not window.isNil and group.window != window:
+      continue
+    for document in group.documents:
+      document.modified = false
+    group.editorView.lastTabs.setLen(0)
+    group.editorView.refresh()
+
 proc saveSessionUnsavedData(
     manager: KosmoWindowManager, savePanel: nimkit.SavePanel = nil
 ): bool =
@@ -1160,8 +1194,54 @@ proc saveSessionUnsavedData(
   for frontend in manager.frontends:
     if frontend.xClosed:
       continue
-    if not frontend.dockController.saveUnsavedEditorTabs(savePanel):
+    if not frontend.dockController.saveUnsavedEditorTabs(savePanel = savePanel):
       return false
+  true
+
+proc presentUnsavedChangesReview(
+    controller: KosmoDockController,
+    window: nimkit.Window,
+    informativeText, discardTitle: string,
+    onSave, onDiscard: proc() {.closure.},
+): bool {.discardable.} =
+  ## Present the Save/Discard/Cancel review sheet for unsaved work owned by
+  ## the controller. `onSave` and `onDiscard` run after the sheet closes;
+  ## cancelling runs neither. Returns false when no sheet could be presented.
+  if controller.isNil or window.isNil:
+    return
+  let frontend = controller.frontend[]
+  if frontend.isNil or frontend.application.isNil:
+    return
+  let app = frontend.application
+  if not app.modalSession().isNil:
+    # A sheet or panel is already reviewing something; stacking another
+    # review on top of it would leave the first session orphaned.
+    return
+  let alert = nimkit.newAlert(
+    "Unsaved Changes",
+    informativeText,
+    style = nimkit.asWarning,
+    buttons = ["Save", discardTitle, "Cancel"],
+  )
+  alert.window.setInheritedAppearance(window.effectiveAppearance())
+  discard alert.rebuildAlertView()
+  alert.contentView.layoutSubtreeIfNeeded()
+  var session: nimkit.ModalSession
+  alert.prepareForModal(
+    proc(response: int) =
+      if session.isNil:
+        return
+      app.endModalSession(session)
+      alert.window.close()
+      case response
+      of KosmoReviewSaveResponse:
+        onSave()
+      of KosmoReviewDiscardResponse:
+        onDiscard()
+      else:
+        discard
+  )
+  session = app.beginModalSheet(window, alert.window)
   true
 
 proc requestQuit*(manager: KosmoWindowManager, savePanel: nimkit.SavePanel = nil) =
@@ -1176,42 +1256,22 @@ proc requestQuit*(manager: KosmoWindowManager, savePanel: nimkit.SavePanel = nil
   if not manager.sessionHasUnsavedData():
     discard app.terminate()
     return
-  if not app.modalSession().isNil:
-    # A sheet or panel is already reviewing something; stacking the quit
-    # review on top of it would leave the first session orphaned.
-    return
   let frontend = manager.activeFrontend()
   if frontend.isNil or frontend.window.isNil:
     # Without a window to host the review the unsaved work cannot be
     # presented, so keep the session running instead of losing it silently.
     return
-  let window = frontend.window
-  let alert = nimkit.newAlert(
-    "Unsaved Changes",
+  discard frontend.dockController.presentUnsavedChangesReview(
+    frontend.window,
     "Kosmo has editors with unsaved changes.",
-    style = nimkit.asWarning,
-    buttons = ["Save", "Discard All", "Cancel"],
-  )
-  alert.window.setInheritedAppearance(window.effectiveAppearance())
-  discard alert.rebuildAlertView()
-  alert.contentView.layoutSubtreeIfNeeded()
-  var session: nimkit.ModalSession
-  alert.prepareForModal(
-    proc(response: int) =
-      if session.isNil:
-        return
-      app.endModalSession(session)
-      alert.window.close()
-      case response
-      of KosmoQuitSaveResponse:
-        if manager.saveSessionUnsavedData(savePanel):
-          discard app.terminate()
-      of KosmoQuitDiscardResponse:
+    "Discard All",
+    onSave = proc() =
+      if manager.saveSessionUnsavedData(savePanel):
         discard app.terminate()
-      else:
-        discard
+    ,
+    onDiscard = proc() =
+      discard app.terminate(),
   )
-  session = app.beginModalSheet(window, alert.window)
 
 proc requestQuit*(frontend: KosmoApplication) =
   ## Quit through the owning session so unsaved editors are reviewed first.
@@ -1222,6 +1282,45 @@ proc requestQuit*(frontend: KosmoApplication) =
     manager.requestQuit()
   elif not frontend.application.isNil:
     discard frontend.application.terminate()
+
+proc reviewWindowClose(
+    controller: KosmoDockController,
+    window: nimkit.Window,
+    savePanel: nimkit.SavePanel = nil,
+): bool =
+  ## Review unsaved editors before `window` closes. Returns false when a
+  ## review sheet took over the close decision or vetoed it.
+  if controller.isNil or window.isNil:
+    return true
+  let
+    frontend = controller.frontend[]
+    # Closing the primary window tears down every window of the frontend, so
+    # its review covers all of the frontend's editors.
+    reviewsWholeFrontend = not frontend.isNil and frontend.window == window
+    scope = if reviewsWholeFrontend: nil else: window
+  let hasUnsaved =
+    if reviewsWholeFrontend:
+      controller.hasUnsavedData()
+    else:
+      controller.hasUnsavedData(window)
+  if not hasUnsaved:
+    return true
+  discard controller.presentUnsavedChangesReview(
+    window,
+    if reviewsWholeFrontend:
+      "Kosmo has editors with unsaved changes."
+    else:
+      "This window has editors with unsaved changes.",
+    "Discard",
+    onSave = proc() =
+      if controller.saveUnsavedEditorTabs(scope, savePanel):
+        window.close()
+    ,
+    onDiscard = proc() =
+      controller.discardUnsavedEditorTabs(scope)
+      window.close(),
+  )
+  false
 
 proc performKosmoMenuAction(
     self: nimkit.DynamicAgent, invocation: var nimkit.Invocation
@@ -1321,6 +1420,18 @@ proc unregister(manager: KosmoWindowManager, frontend: KosmoApplication) =
     manager.frontends.delete(index)
 
 protocol KosmoWindowLifecycleDelegate of nimkit.WindowDelegateProtocol:
+  method windowShouldClose(
+      lifecycle: KosmoWindowLifecycle, window: nimkit.Window
+  ): bool =
+    # The window-manager close button and window.close() both arrive here;
+    # the review sheet closes the window when the user decides.
+    if lifecycle.frontend.isNil:
+      return true
+    let frontend = lifecycle.frontend[]
+    if frontend.isNil or frontend.xClosed or frontend.dockController.isNil:
+      return true
+    frontend.dockController.reviewWindowClose(window)
+
   method windowDidClose(lifecycle: KosmoWindowLifecycle, window: nimkit.Window) =
     discard window
     if not lifecycle.frontend.isNil:
@@ -2209,6 +2320,16 @@ when defined(merendaTests):
     frontend.dockController.saveCurrentPaneTab(
       frontend.dockController.activePaneGroup(), panel
     )
+
+  proc reviewWindowCloseForTesting*(
+      frontend: KosmoApplication, savePanel: nimkit.SavePanel = nil
+  ): bool =
+    ## Review the frontend's window for unsaved editors like the
+    ## window-manager close request does, answering the Save As flow for
+    ## untitled editors through `savePanel`.
+    if frontend.isNil or frontend.dockController.isNil:
+      return true
+    frontend.dockController.reviewWindowClose(frontend.window, savePanel)
 
 proc openDocument*(
     frontend: KosmoApplication, document: KosmoPaneDocument

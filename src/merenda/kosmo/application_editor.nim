@@ -61,6 +61,12 @@ proc openPath*(frontend: KosmoApplication, path: string): bool {.discardable.}
 proc show*(frontend: KosmoApplication)
 proc close*(frontend: KosmoApplication)
 proc requestQuit*(frontend: KosmoApplication)
+proc reviewWindowClose(
+  controller: KosmoDockController,
+  window: nimkit.Window,
+  savePanel: nimkit.SavePanel = nil,
+): bool
+
 proc setEditorInputPolicy*(frontend: KosmoApplication, policy: KosmoEditorInputPolicy)
 proc setForceInputMode*(frontend: KosmoApplication, enabled: bool)
 proc syncKeyModeChoices(controller: KosmoDockController)
@@ -1963,16 +1969,10 @@ proc presentUnsavedChangesConfirmation(
 proc closeWindow(
     controller: KosmoDockController, window: nimkit.Window
 ): bool {.discardable.} =
+  ## Close `window`; unsaved editors are reviewed through the window's
+  ## delegate, the same review the window-manager close button runs.
   if controller.isNil or window.isNil:
     return
-  if controller.hasUnsavedData(window):
-    return controller.presentUnsavedChangesConfirmation(
-      window,
-      proc() =
-        if not window.isClosed:
-          window.close()
-      ,
-    )
   window.close()
   true
 

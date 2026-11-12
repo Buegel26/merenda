@@ -1176,6 +1176,18 @@ proc newKosmoDetachedContentView(
   discard result.withProtocol(KosmoDetachedContentLayout)
 
 protocol KosmoDetachedWindowLifecycleDelegate of nimkit.WindowDelegateProtocol:
+  method windowShouldClose(
+      lifecycle: KosmoDetachedWindowLifecycle, window: nimkit.Window
+  ): bool =
+    # The window-manager close button and window.close() both arrive here;
+    # the review sheet closes the window when the user decides.
+    if lifecycle.controller.isNil:
+      return true
+    let controller = lifecycle.controller[]
+    if controller.isNil or controller.frontend.isNil or controller.frontend[].xClosed:
+      return true
+    controller.reviewWindowClose(window)
+
   method windowDidClose(
       lifecycle: KosmoDetachedWindowLifecycle, window: nimkit.Window
   ) =

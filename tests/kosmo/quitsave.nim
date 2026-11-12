@@ -54,7 +54,7 @@ proc preservedCopyCount(directory: string): int =
     else:
       discard
 
-suite "Kosmo quit":
+suite "Kosmo unsaved editor reviews":
   test "quitting without unsaved editors terminates immediately":
     let
       app = newApplication("Kosmo Quit Clean")
@@ -320,3 +320,110 @@ suite "Kosmo quit":
     check app.modalSession().isNil
     check not app.isTerminating()
     check frontend.editorView.editor.tabs()[0].modified
+
+  test "closing a clean window closes without a review":
+    let
+      root = createTempDir("kosmo-window-clean-close-", "")
+      path = root / "clean.txt"
+      app = newApplication("Kosmo Window Clean Close Test")
+      manager = newKosmoWindowManager(app)
+      frontend = newKosmoApplication(manager, root, monitorsGitStatus = false)
+    defer:
+      removeDir(root)
+    defer:
+      manager.close()
+    writeFile(path, "clean")
+    frontend.presentFrontend()
+    require frontend.openPath(path)
+
+    frontend.window.close()
+    check app.modalSession().isNil
+    check frontend.window.isClosed
+
+  test "closing a window with unsaved editors reviews before closing":
+    let
+      root = createTempDir("kosmo-window-close-review-", "")
+      path = root / "modified.txt"
+      app = newApplication("Kosmo Window Close Review Test")
+      manager = newKosmoWindowManager(app)
+      frontend = newKosmoApplication(manager, root, monitorsGitStatus = false)
+    defer:
+      removeDir(root)
+    defer:
+      manager.close()
+    writeFile(path, "original")
+    frontend.presentFrontend()
+    require frontend.openPath(path)
+    frontend.typeIntoActiveEditor(" edited")
+    require frontend.editorView.editor.tabs()[0].modified
+
+    frontend.window.close()
+    let session = app.modalSession()
+    require not session.isNil
+    check session.window.title == "Unsaved Changes"
+    check session.parentWindow == frontend.window
+    check session.mode == msmWindowModal
+    check session.window.clickModalButton("Cancel")
+    check app.modalSession().isNil
+    check not frontend.window.isClosed
+    check frontend.editorView.editor.tabs()[0].modified
+    check readFile(path) == "original"
+
+    frontend.window.close()
+    check app.modalSession().window.clickModalButton("Discard")
+    check app.modalSession().isNil
+    check frontend.window.isClosed
+    check readFile(path) == "original"
+
+  test "closing a window through Save writes the window's editors":
+    let
+      root = createTempDir("kosmo-window-close-save-", "")
+      path = root / "modified.txt"
+      app = newApplication("Kosmo Window Close Save Test")
+      manager = newKosmoWindowManager(app)
+      frontend = newKosmoApplication(manager, root, monitorsGitStatus = false)
+    defer:
+      removeDir(root)
+    defer:
+      manager.close()
+    writeFile(path, "original")
+    frontend.presentFrontend()
+    require frontend.openPath(path)
+    frontend.typeIntoActiveEditor(" edited")
+    require frontend.editorView.editor.tabs()[0].modified
+
+    frontend.window.close()
+    require not app.modalSession().isNil
+    check app.modalSession().window.clickModalButton("Save")
+    check app.modalSession().isNil
+    check frontend.window.isClosed
+    check readFile(path).strip() == "original edited"
+
+  test "an unanswered untitled save cancels the window close":
+    let
+      root = createTempDir("kosmo-window-close-untitled-", "")
+      app = newApplication("Kosmo Window Close Untitled Test")
+      manager = newKosmoWindowManager(app)
+      frontend = newKosmoApplication(manager, root, monitorsGitStatus = false)
+      panel = newSavePanel()
+    defer:
+      removeDir(root)
+    defer:
+      manager.close()
+      panel.window.close()
+    frontend.presentFrontend()
+    frontend.typeIntoActiveEditor("still unsaved")
+    require frontend.editorView.editor.tabs()[0].modified
+    # The panel offers no valid destination, as when the user leaves the Save
+    # As panel without choosing one.
+    panel.nameFieldStringValue = "saved.txt"
+    panel.allowedFileTypes = @["md"]
+
+    check not frontend.reviewWindowCloseForTesting(panel)
+    require not app.modalSession().isNil
+    check app.modalSession().window.clickModalButton("Save")
+    check app.modalSession().isNil
+    check not frontend.window.isClosed
+    check frontend.editorView.editor.tabs()[0].modified
+    check frontend.editorView.editor.bufferText(frontend.editorView.editor.tabs()[0].id) ==
+      some("still unsaved")

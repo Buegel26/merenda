@@ -1354,6 +1354,19 @@ proc closeTab*(
   editor.matterSyntaxFallback.snapshots.del(id.toMoeBufferId)
   KosmoTabCloseResult(closed: true)
 
+proc markBufferSaved*(editor: KosmoEditor, id: KosmoBufferId) =
+  ## Clear a buffer's unsaved marker without closing it or writing its file.
+  if editor.isNil or editor.editor.isNil:
+    return
+  let buffer = editor.editor.bufferById(id.toMoeBufferId)
+  if buffer.isNone:
+    return
+  if editor.activeBufferId() == some(id.toMoeBufferId):
+    # Moe keeps edits in an open transaction until Insert exits. Commit it
+    # before marking the buffer saved, or it still reports modified.
+    editor.editor.finalizeInsertSessionForBufferSwitch(buffer.get)
+  buffer.get.markSaved()
+
 proc save*(editor: KosmoEditor): KosmoSaveResult =
   ## Save the active buffer to its current path.
   if editor.isNil or editor.editor.isNil:
