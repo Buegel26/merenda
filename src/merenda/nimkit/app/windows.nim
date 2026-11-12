@@ -2208,15 +2208,16 @@ proc endTransientSession*(
 ): bool {.discardable.} =
   window.finishTransientSession(reason, notifyDismiss = false)
 
+proc delegatePermitsClose(window: Window): bool =
+  ## Whether the window delegate allows the window to close. The same review
+  ## backs window.close() and window-manager close requests.
+  window.xDelegate.isNil or
+    window.xDelegate.trySendLocal(windowShouldClose(), window).get(true)
+
 proc close*(window: Window) =
   if window.xClosed:
     return
-  let shouldClose =
-    if window.xDelegate.isNil:
-      true
-    else:
-      window.xDelegate.trySendLocal(windowShouldClose(), window).get(true)
-  if not shouldClose:
+  if not window.delegatePermitsClose():
     return
   when defined(merenda.devControl):
     if not window.isNil:
@@ -3643,6 +3644,10 @@ proc ensureNativeWindow*(window: Window) =
 
   logRuntimeEnvironment()
   let callbacks = HostWindowCallbacks(
+    onCloseRequest: proc(): bool =
+      # A window-manager close request runs the delegate review before the
+      # native window is destroyed; a veto keeps the window open.
+      window.delegatePermitsClose(),
     onClose: proc() =
       window.markHostClosed(),
     onResize: proc() =

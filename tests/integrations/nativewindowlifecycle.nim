@@ -1,5 +1,5 @@
 ## Native window lifecycle regressions.
-import std/[unittest]
+import std/[os, tempfiles, unittest]
 
 import figdraw/windowing/siwinshim
 
@@ -22,6 +22,26 @@ protocol NativeWindowDelegateSpyHooks of WindowDelegateProtocol:
   ) =
     discard window
     delegate.events.add("didClose")
+
+proc buttonWithTitle(view: View, title: string): Button =
+  if view of Button and Button(view).title == title:
+    return Button(view)
+  for child in view.subviews():
+    result = child.buttonWithTitle(title)
+    if not result.isNil:
+      return
+
+func rectCenter(rect: Rect): Point =
+  initPoint(
+    rect.origin.x + rect.size.width / 2.0'f32,
+    rect.origin.y + rect.size.height * 0.5'f32,
+  )
+
+proc clickModalButton(window: nimkitWindows.Window, title: string): bool =
+  let button = window.contentView().buttonWithTitle(title)
+  if button.isNil:
+    return
+  window.clickAt(button.pointToWindow(button.bounds().rectCenter()))
 
 suite "NimKit native window lifecycle":
   test "replacing a native popup keeps the replacement open and reusable":
@@ -134,5 +154,50 @@ suite "NimKit native window lifecycle":
       except CatchableError:
         skip()
         break nativeKosmoClose
+      finally:
+        frontend.close()
+
+  test "a window-manager close request reviews unsaved editors first":
+    block nativeCloseRequest:
+      let
+        root = createTempDir("kosmo-native-close-request-", "")
+        path = root / "modified.txt"
+        app = newApplication("Native Close Request Test")
+        frontend = newKosmoApplication(app, root, monitorsGitStatus = false)
+      defer:
+        removeDir(root)
+      try:
+        writeFile(path, "original")
+        frontend.show()
+        require frontend.openPath(path)
+        require frontend.window.makeFirstResponder(frontend.editorView)
+        require frontend.editorView.editor.handleKey("A")
+        require frontend.editorView.editor.handleTextInput(" edited")
+        require frontend.editorView.editor.handleKey("Esc")
+        check frontend.editorView.editor.tabs()[0].modified
+        check app.runForFrames(1) == 1
+        check frontend.window.nativeReady
+        let nativeWindow = frontend.window.nativeWindowOrNil()
+        require not nativeWindow.isNil
+
+        # The window-manager close request is vetoed while editors are
+        # unsaved; the review sheet takes over the close decision.
+        check not siwinshim.closeRequestAccepted(nativeWindow)
+        check not frontend.window.isClosed
+        let session = app.modalSession()
+        require not session.isNil
+        check session.window.title == "Unsaved Changes"
+        check session.window.clickModalButton("Cancel")
+        check app.modalSession().isNil
+        check frontend.editorView.editor.tabs()[0].modified
+
+        # Asking again and discarding closes the window without writing.
+        check not siwinshim.closeRequestAccepted(nativeWindow)
+        check app.modalSession().window.clickModalButton("Discard")
+        check frontend.window.isClosed
+        check readFile(path) == "original"
+      except CatchableError:
+        skip()
+        break nativeCloseRequest
       finally:
         frontend.close()
